@@ -16,6 +16,7 @@ import sys
 from typing import Annotated
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -72,6 +73,7 @@ def _guard(call):
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Current health of a service: status, error rate, p95 latency, "
     "and the revision currently deployed."
 )
@@ -80,6 +82,7 @@ def get_service_health(service: Service = "checkout-api") -> dict:
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Minute-bucketed metric history for a service: request_count, "
     "error_count, error_rate, and p50/p95/p99 latency. Use this to find when a "
     "problem started."
@@ -96,6 +99,7 @@ def get_metrics(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Search application logs. Filter by free text and/or level "
     "(INFO, ERROR). Error entries include the exception, file, line, and full "
     "stack trace."
@@ -115,6 +119,7 @@ def query_logs(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Deployment history for a service, oldest first. Each record has "
     "a revision id, summary, author, timestamp, and whether it proved healthy. "
     "Correlate these timestamps against when metrics degraded."
@@ -123,7 +128,9 @@ def get_recent_deployments(service: Service = "checkout-api") -> dict:
     return _check_service(service) or _guard(lambda: simulator.get("/deployments"))
 
 
-@server.tool(description="Full details of a specific incident, including the breached threshold.")
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    description="Full details of a specific incident, including the breached threshold.")
 def get_incident_details(
     incident_id: Annotated[str, Field(description="Incident id, e.g. 'INC-4021'.")] = "INC-4021",
 ) -> dict:
@@ -131,6 +138,7 @@ def get_incident_details(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="A captured stack trace from the failing code path, including the "
     "exception type, source file, line number, and the offending source line."
 )

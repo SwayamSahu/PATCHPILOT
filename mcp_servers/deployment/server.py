@@ -15,6 +15,7 @@ import sys
 from typing import Annotated
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -50,6 +51,7 @@ def _guard(call):
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
     description="Deploy a candidate fix to staging. Reversible and always "
     "permitted. Provide the full new contents of checkout.py."
 )
@@ -64,12 +66,15 @@ def deploy_staging(
     )
 
 
-@server.tool(description="Health of the staging environment after a staging deploy.")
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    description="Health of the staging environment after a staging deploy.")
 def get_staging_health() -> dict:
     return _guard(lambda: simulator.get("/_control/staging/health"))
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Prepare a production deployment and return the plan, its risk "
     "assessment, and a deployment_id. This does NOT deploy anything. The "
     "deployment_id is what a human approves."
@@ -107,6 +112,7 @@ def prepare_production_deployment(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True),
     description="Deploy to PRODUCTION. Irreversible. Requires that a human has "
     "already approved this specific deployment_id; there is no way to authorise "
     "it from here. Fails safe if approval is absent, expired, or already used."
@@ -200,6 +206,7 @@ def deploy_production(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Current production health. Call repeatedly after a deployment to "
     "confirm the incident has actually recovered."
 )
