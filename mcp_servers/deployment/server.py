@@ -60,7 +60,6 @@ def deploy_staging(
             {
                 "revision_id": "staging",
                 "summary": f"[staging] {summary}",
-                "healthy": True,
                 "source": source,
                 "deployed_by": "patchpilot-staging",
             },
@@ -137,7 +136,6 @@ def deploy_production(
             {
                 "revision_id": "4c22",
                 "summary": summary,
-                "healthy": True,
                 "source": source,
                 "commit_sha": commit_sha,
                 "deployed_by": "patchpilot",
