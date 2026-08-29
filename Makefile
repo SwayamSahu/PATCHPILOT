@@ -1,27 +1,18 @@
-.PHONY: help setup start stop test demo reset clean
+# PatchPilot. Targets are added as the components they drive land, so every
+# target here runs today.
+.PHONY: help setup test lint
 
 help:
 	@echo "PatchPilot"
-	@echo "  make setup   install deps and configure the TrueForge harness"
-	@echo "  make start   run harness, simulator, MCP servers, api, web"
-	@echo "  make stop    stop everything"
-	@echo "  make test    run the full test suite"
-	@echo "  make demo    reset to a clean incident and start the demo"
-	@echo "  make reset   reset simulator + repo + session state"
+	@echo "  make setup   create the Python environment and install dependencies"
+	@echo "  make test    run the test suite"
+	@echo "  make lint    run the linter"
 
 setup:
 	@bash scripts/setup.sh
 
-start:
-	@bash scripts/run-demo.sh
-
-stop:
-	@bash scripts/stop.sh
-
 test:
 	@bash scripts/test.sh
 
-reset:
-	@bash scripts/reset-demo.sh
-
-demo: reset start
+lint:
+	@.venv/bin/ruff check .
