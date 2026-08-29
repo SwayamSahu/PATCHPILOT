@@ -27,8 +27,10 @@ CANONICAL_PATH = Path(__file__).with_name("checkout.py")
 """The versioned source. Read-only as far as the simulator is concerned."""
 
 _MODULE_NAME = "patchpilot_live_checkout"
+_STAGING_MODULE_NAME = "patchpilot_staging_checkout"
 _lock = threading.RLock()
 _module = None
+_staging_module = None
 
 
 def _live_path() -> Path:
@@ -39,12 +41,12 @@ def _live_path() -> Path:
     return state.STATE_PATH.parent / "live" / "checkout.py"
 
 
-def _load(path: Path):
-    spec = importlib.util.spec_from_file_location(_MODULE_NAME, path)
+def _load(path: Path, module_name: str = _MODULE_NAME):
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:  # pragma: no cover - defensive
         raise RuntimeError(f"could not load live checkout module from {path}")
     module = importlib.util.module_from_spec(spec)
-    sys.modules[_MODULE_NAME] = module
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -138,3 +140,78 @@ def verify_healthy() -> bool:
         return checkout.compute_total(checkout.Cart(subtotal=100.0, discount=0.25)) == 75.0
     except Exception:
         return False
+
+
+# --------------------------------------------------------------------------
+# Staging
+# --------------------------------------------------------------------------
+#
+# Staging is a genuinely separate environment, not a label. It has its own
+# source file and its own loaded module, and nothing that happens here touches
+# what production is running.
+#
+# This is not a stylistic choice. Staging deploys are the one write an agent may
+# perform without human approval, on the grounds that they are reversible. If a
+# staging deploy could reach production, that reasoning collapses and the
+# approval gate can be walked straight around by calling the unguarded tool.
+
+
+def _staging_path() -> Path:
+    from . import state
+
+    return state.STATE_PATH.parent / "staging" / "checkout.py"
+
+
+def staging_module():
+    """The module the staging environment is running, seeded from production."""
+    global _staging_module
+    with _lock:
+        if _staging_module is None:
+            path = _staging_path()
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(live_source())
+            _staging_module = _load(path, _STAGING_MODULE_NAME)
+        return _staging_module
+
+
+def deploy_staging_source(source: str):
+    """Publish source to staging only. Production is untouched."""
+    global _staging_module
+    with _lock:
+        path = _staging_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        candidate_path = path.with_name("checkout.candidate.py")
+        candidate_path.write_text(source)
+        try:
+            candidate = _load(candidate_path, _STAGING_MODULE_NAME)
+        except Exception as exc:
+            candidate_path.unlink(missing_ok=True)
+            raise InvalidDeployment(f"proposed source could not be loaded: {exc}") from exc
+        for attr in ("Cart", "checkout", "compute_total"):
+            if not hasattr(candidate, attr):
+                candidate_path.unlink(missing_ok=True)
+                raise InvalidDeployment(f"proposed source does not define {attr!r}")
+        candidate_path.replace(path)
+        _staging_module = _load(path, _STAGING_MODULE_NAME)
+        return _staging_module
+
+
+def verify_staging_healthy() -> bool:
+    """Smoke-test the staging code, exactly as production is smoke-tested."""
+    checkout = staging_module()
+    try:
+        if checkout.compute_total(checkout.Cart(subtotal=100.0, discount=0.0)) != 100.0:
+            return False
+        return checkout.compute_total(checkout.Cart(subtotal=100.0, discount=0.25)) == 75.0
+    except Exception:
+        return False
+
+
+def reset_staging() -> None:
+    global _staging_module
+    with _lock:
+        _staging_module = None
+        path = _staging_path()
+        if path.exists():
+            path.unlink()

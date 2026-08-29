@@ -22,7 +22,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from mcp_servers.common import simulator  # noqa: E402
 from mcp_servers.common.simulator import SimulatorError, SimulatorUnavailable  # noqa: E402
 from mcp_servers.deployment import approvals  # noqa: E402
-from mcp_servers.deployment.approvals import HumanApprovalRequired  # noqa: E402
+from mcp_servers.deployment.approvals import (  # noqa: E402
+    ArtifactMismatch,
+    HumanApprovalRequired,
+)
 
 server = MCPServer(
     name="patchpilot-deployment",
@@ -56,20 +59,14 @@ def deploy_staging(
 ) -> dict:
     return _guard(
         lambda: simulator.post(
-            "/_control/deploy",
-            {
-                "revision_id": "staging",
-                "summary": f"[staging] {summary}",
-                "source": source,
-                "deployed_by": "patchpilot-staging",
-            },
+            "/_control/staging/deploy", {"source": source, "summary": summary}
         )
     )
 
 
 @server.tool(description="Health of the staging environment after a staging deploy.")
 def get_staging_health() -> dict:
-    return _guard(lambda: simulator.get("/health"))
+    return _guard(lambda: simulator.get("/_control/staging/health"))
 
 
 @server.tool(
@@ -78,15 +75,22 @@ def get_staging_health() -> dict:
     "deployment_id is what a human approves."
 )
 def prepare_production_deployment(
+    source: Annotated[str, Field(description="Exact checkout.py contents to be deployed.")],
     summary: Annotated[str, Field(description="One-line description of the change.")],
     pr_number: Annotated[int, Field(description="Pull request number carrying the fix.")] = 0,
     commit_sha: Annotated[str, Field(description="Commit SHA to deploy.")] = "",
 ) -> dict:
-    """Register an intent to deploy. The human approves this id, not a free action."""
+    """Register an intent to deploy, recording exactly what is being proposed.
+
+    The source is content-addressed here. That digest is what the human's approval
+    is bound to, so the change that ships is provably the change that was reviewed.
+    """
     deployment_id = f"deploy-{pr_number or 'x'}-{commit_sha[:7] or 'head'}"
+    record = approvals.prepare(deployment_id, source, summary, pr_number, commit_sha)
     health = _guard(lambda: simulator.get("/health"))
     return {
         "deployment_id": deployment_id,
+        "source_sha256": record["source_sha256"],
         "summary": summary,
         "pr_number": pr_number,
         "commit_sha": commit_sha,
@@ -111,15 +115,39 @@ def deploy_production(
     deployment_id: Annotated[
         str, Field(description="The deployment_id returned by prepare_production_deployment.")
     ],
-    source: Annotated[str, Field(description="Full new contents of checkout.py.")],
-    summary: Annotated[str, Field(description="One-line description of the change.")],
-    commit_sha: Annotated[str, Field(description="Commit SHA being deployed.")] = "",
+    source: Annotated[str, Field(description="Full contents of checkout.py, exactly as prepared.")],
 ) -> dict:
-    """Deploy to production, if and only if a human approved this deployment.
+    """Deploy to production, if and only if a human approved *this exact change*.
 
-    The approval token is *looked up*, never accepted as an argument. A model that
-    invented a token would have nowhere to put it.
+    Two things are checked, in this order:
+
+    1. the source matches the digest recorded when the deployment was prepared, so
+       an approval cannot be redirected at different code; and
+    2. a human approval exists and is unspent.
+
+    The digest is checked first so a mismatched attempt cannot burn a valid
+    approval. The approval token itself is looked up, never accepted as an
+    argument: a model that invented one would have nowhere to put it. The summary
+    and commit come from the prepared record rather than from the caller, so
+    neither can be restated at deploy time.
     """
+    try:
+        prepared = approvals.verify_artifact(deployment_id, source)
+    except ArtifactMismatch as exc:
+        return {
+            "error": "artifact_mismatch",
+            "deployment_id": deployment_id,
+            "detail": str(exc),
+            "production_changed": False,
+        }
+    except HumanApprovalRequired as exc:
+        return {
+            "error": "human_approval_required",
+            "deployment_id": deployment_id,
+            "detail": str(exc),
+            "production_changed": False,
+        }
+
     try:
         approval = approvals.consume(deployment_id)
     except HumanApprovalRequired as exc:
@@ -130,11 +158,19 @@ def deploy_production(
             "production_changed": False,
         }
 
+    summary = prepared["summary"]
+    commit_sha = prepared["commit_sha"]
+
     result = _guard(
         lambda: simulator.post(
             "/_control/deploy",
             {
-                "revision_id": "4c22",
+                # Derived from the commit actually being shipped. A hard-coded id
+                # made every deployment claim to be the same revision, so the
+                # ledger could not distinguish one production change from another.
+                "revision_id": f"pr{prepared['pr_number']}-{commit_sha[:7]}"
+                if commit_sha
+                else deployment_id,
                 "summary": summary,
                 "source": source,
                 "commit_sha": commit_sha,

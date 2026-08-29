@@ -15,6 +15,10 @@ an approval for that specific deployment id. The resulting token is:
   by a prompt injection that has captured the agent;
 * **bound to one deployment id**, so an approval for a reviewed change cannot be
   redirected at a different one;
+* **bound to the exact artifact**, by a digest of the source recorded when the
+  deployment was prepared. Approving deployment X and then shipping different
+  code under X's id would defeat the entire premise that a human reviewed what
+  ships, so the digest is checked before the approval is even spent;
 * **single use**, so a replayed call after a rollback does not redeploy;
 * **time limited**, so an approval left open overnight is not still live.
 
@@ -24,6 +28,7 @@ together they mean that even a fully compromised agent cannot ship to production
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -71,6 +76,79 @@ class Approval:
     @property
     def consumed(self) -> bool:
         return self.consumed_at is not None
+
+
+# --------------------------------------------------------------------------
+# Prepared deployments
+# --------------------------------------------------------------------------
+#
+# A prepared deployment records what a human is being asked to approve. The
+# digest is what makes the approval mean something: without it, an approval
+# authorises an id rather than a change, and any source at all could be shipped
+# under an approved id.
+
+
+def _pending_path() -> Path:
+    return STORE_PATH.with_name("pending_deployments.json")
+
+
+def source_digest(source: str) -> str:
+    """Content address of the artifact under review."""
+    return hashlib.sha256(source.encode()).hexdigest()
+
+
+def prepare(deployment_id: str, source: str, summary: str, pr_number: int, commit_sha: str) -> dict:
+    """Record what is being proposed, so approval can be tied to it."""
+    with _lock:
+        path = _pending_path()
+        data = json.loads(path.read_text()) if path.exists() else {}
+        record = {
+            "deployment_id": deployment_id,
+            "source_sha256": source_digest(source),
+            "summary": summary,
+            "pr_number": pr_number,
+            "commit_sha": commit_sha,
+            "prepared_at": _now().isoformat(),
+        }
+        data[deployment_id] = record
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(path)
+        return record
+
+
+def get_prepared(deployment_id: str):
+    path = _pending_path()
+    if not path.exists():
+        return None
+    return json.loads(path.read_text()).get(deployment_id)
+
+
+class ArtifactMismatch(ApprovalError):
+    """The source offered for deployment is not the source that was approved."""
+
+
+def verify_artifact(deployment_id: str, source: str) -> dict:
+    """Confirm the source about to ship is the source that was reviewed.
+
+    Checked *before* the approval is consumed, so a mismatched attempt does not
+    burn a valid human approval.
+    """
+    record = get_prepared(deployment_id)
+    if record is None:
+        raise HumanApprovalRequired(
+            f"deployment {deployment_id!r} was never prepared, so nothing was reviewed "
+            "and there is nothing to approve."
+        )
+    actual = source_digest(source)
+    if actual != record["source_sha256"]:
+        raise ArtifactMismatch(
+            f"the source offered for deployment {deployment_id!r} does not match what was "
+            f"approved (expected sha256 {record['source_sha256'][:12]}…, got {actual[:12]}…). "
+            "Production deployment is refused."
+        )
+    return record
 
 
 def _now() -> datetime:
@@ -167,3 +245,4 @@ def clear() -> None:
     """Wipe the store. Used by the demo reset script and by tests."""
     with _lock:
         _write({})
+        _pending_path().unlink(missing_ok=True)

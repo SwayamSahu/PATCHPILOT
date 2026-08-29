@@ -71,6 +71,13 @@ class CheckoutRequest(BaseModel):
     currency: str = Field("USD", min_length=3, max_length=3)
 
 
+class StagingDeployRequest(BaseModel):
+    """A candidate change for the staging environment."""
+
+    source: str = Field(..., min_length=1, description="Candidate checkout.py contents.")
+    summary: str = Field(..., min_length=1)
+
+
 class DeployRequest(BaseModel):
     """A deployment request.
 
@@ -184,6 +191,7 @@ def control_reset() -> dict:
     """
     with _DEPLOY_LOCK:
         _restore_baseline_source()
+        live.reset_staging()
         telemetry.clear_sample_cache()
         fresh = state.reset()
         return {"status": "reset", "deployed_revision": fresh.current_revision_id}
@@ -235,6 +243,35 @@ def _apply_source(source: str) -> None:
 def _restore_baseline_source() -> None:
     """Roll production back to the versioned source, faults and all."""
     live.reset()
+
+
+@app.post("/_control/staging/deploy")
+def control_deploy_staging(request: StagingDeployRequest) -> dict:
+    """Deploy to staging. Production is not touched by this endpoint at all."""
+    with _DEPLOY_LOCK:
+        try:
+            live.deploy_staging_source(request.source)
+        except live.InvalidDeployment as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        healthy = live.verify_staging_healthy()
+    return {
+        "status": "deployed",
+        "environment": "staging",
+        "summary": request.summary,
+        "healthy": healthy,
+        "production_untouched": True,
+    }
+
+
+@app.get("/_control/staging/health")
+def control_staging_health() -> dict:
+    """Health of the staging environment, from a smoke test of its own module."""
+    healthy = live.verify_staging_healthy()
+    return {
+        "environment": "staging",
+        "status": "healthy" if healthy else "degraded",
+        "service": state.SERVICE_NAME,
+    }
 
 
 @app.get("/_control/live-source")
