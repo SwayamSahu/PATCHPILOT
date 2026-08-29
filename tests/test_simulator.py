@@ -187,3 +187,86 @@ def test_reset_restores_the_broken_world(client):
     client.post("/_control/reset")
     assert client.get("/health").json()["deployed_revision"] == "4c21"
     assert client.post("/checkout", json={"subtotal": 100, "discount": 0}).status_code == 500
+
+
+# --------------------------------------------------------------------------
+# Regression tests for findings raised in Qodo review of PR #2
+# --------------------------------------------------------------------------
+
+
+def test_a_deployment_cannot_declare_itself_healthy(client):
+    """Health is verified against the running code, never taken on trust."""
+    response = client.post(
+        "/_control/deploy",
+        json={
+            "revision_id": "4c22",
+            "summary": "claims to fix things but ships no code",
+            "healthy": True,  # ignored: there is no such field
+            "deployed_by": "patchpilot",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["deployment"]["healthy"] is False, "unfixed code must not read healthy"
+    assert client.get("/health").json()["status"] == "degraded"
+    assert client.post("/checkout", json={"subtotal": 100, "discount": 0}).status_code == 500
+
+
+def test_invalid_source_is_rejected_and_leaves_production_untouched(client):
+    before = client.get("/_control/live-source").json()["source"]
+    response = client.post(
+        "/_control/deploy",
+        json={"revision_id": "4c22", "summary": "broken patch", "source": "def (((("},
+    )
+    assert response.status_code == 422
+    assert client.get("/_control/live-source").json()["source"] == before
+    assert client.post("/checkout", json={"subtotal": 100, "discount": 0.25}).status_code == 200
+
+
+def test_source_missing_required_functions_is_rejected(client):
+    response = client.post(
+        "/_control/deploy",
+        json={"revision_id": "4c22", "summary": "empty", "source": "x = 1\n"},
+    )
+    assert response.status_code == 422
+    assert "compute_total" in response.json()["detail"] or "Cart" in response.json()["detail"]
+
+
+def test_historical_errors_keep_their_exception_after_the_fix_ships(client):
+    """The evidence for the incident must survive the incident being fixed."""
+    before = client.get("/logs", params={"level": "ERROR", "limit": 5}).json()["entries"]
+    assert before and before[0]["exception"] == "ZeroDivisionError"
+
+    _deploy_fix(client)
+
+    after = client.get("/logs", params={"level": "ERROR", "limit": 50}).json()["entries"]
+    faulty_entries = [e for e in after if e["revision_id"] == "4c21"]
+    assert faulty_entries, "history should still contain the faulty window"
+    assert all(e["exception"] == "ZeroDivisionError" for e in faulty_entries)
+    assert all(e["file"] == "checkout.py" for e in faulty_entries)
+
+
+def test_identical_windows_return_byte_identical_series(client):
+    """The determinism guarantee, asserted on whole responses rather than overlaps."""
+    first = client.get("/metrics", params={"minutes": 20}).json()["series"]
+    second = client.get("/metrics", params={"minutes": 20}).json()["series"]
+    assert first == second
+
+
+def test_logs_never_contain_events_from_the_future(client):
+    from datetime import datetime
+
+    now = datetime.now(UTC).isoformat()
+    entries = client.get("/logs", params={"limit": 200}).json()["entries"]
+    assert entries
+    assert all(e["timestamp"] <= now for e in entries)
+
+
+def test_incident_opening_time_is_when_the_fault_began(client):
+    """Deploying the fix must not rewrite when the incident started."""
+    opened_at = client.get("/incidents/INC-4021").json()["opened_at"]
+    deployments = client.get("/deployments").json()["deployments"]
+    faulty = next(d for d in deployments if not d["healthy"])
+    assert opened_at == faulty["deployed_at"]
+
+    _deploy_fix(client)
+    assert client.get("/incidents/INC-4021").json()["opened_at"] == opened_at

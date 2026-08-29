@@ -12,6 +12,7 @@ server calls them, and only after the human approval gate has been cleared.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Query
@@ -20,6 +21,9 @@ from pydantic import BaseModel, Field
 from . import incidents, live, logs, revisions, state, telemetry
 
 logger = logging.getLogger("checkout-api")
+
+_DEPLOY_LOCK = threading.RLock()
+"""Serialises publishing code and recording the ledger entry as one operation."""
 
 app = FastAPI(
     title="checkout-api",
@@ -35,9 +39,17 @@ class CheckoutRequest(BaseModel):
 
 
 class DeployRequest(BaseModel):
+    """A deployment request.
+
+    Note there is no `healthy` field. Health is *verified* against the code that
+    ends up running, never declared by the caller: a request that could assert its
+    own healthiness could make telemetry report recovery while production kept
+    serving the broken module, which would hollow out the one guarantee this
+    simulator exists to provide.
+    """
+
     revision_id: str = Field(..., min_length=1)
     summary: str = Field(..., min_length=1)
-    healthy: bool = True
     source: str | None = Field(None, description="New checkout.py contents to apply.")
     commit_sha: str | None = None
     deployed_by: str = "ci"
@@ -133,24 +145,31 @@ def control_reset() -> dict:
 
 @app.post("/_control/deploy")
 def control_deploy(request: DeployRequest) -> dict:
-    """Deploy a revision, optionally replacing the checkout implementation.
+    """Deploy a revision, replacing the running checkout implementation.
 
-    When `source` is supplied it is written to `checkout.py` and the module is
-    reloaded, so the running service immediately executes the new code. This is
-    the step that makes recovery real.
+    Publishing the code and recording the ledger entry happen under a single lock.
+    Holding two separate locks let concurrent deploys interleave and leave the
+    newest ledger entry describing a different revision than the one actually
+    running.
     """
-    if request.source is not None:
-        _apply_source(request.source)
+    with _DEPLOY_LOCK:
+        if request.source is not None:
+            try:
+                _apply_source(request.source)
+            except live.InvalidDeployment as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    record = state.record_deployment(
-        revision_id=request.revision_id,
-        summary=request.summary,
-        author="patchpilot" if request.deployed_by != "ci" else "ci",
-        healthy=request.healthy,
-        commit_sha=request.commit_sha,
-        deployed_by=request.deployed_by,
-    )
-    logger.info("deployed revision %s", record.revision_id)
+        healthy = live.verify_healthy()
+        record = state.record_deployment(
+            revision_id=request.revision_id,
+            summary=request.summary,
+            author="patchpilot" if request.deployed_by != "ci" else "ci",
+            healthy=healthy,
+            commit_sha=request.commit_sha,
+            deployed_by=request.deployed_by,
+        )
+
+    logger.info("deployed revision %s (verified healthy=%s)", record.revision_id, healthy)
     return {"status": "deployed", "deployment": record.__dict__, "health": telemetry.health()}
 
 

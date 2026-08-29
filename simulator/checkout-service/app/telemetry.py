@@ -89,10 +89,22 @@ def _sample(at: datetime) -> dict:
     }
 
 
+def floor_to_minute(moment: datetime) -> datetime:
+    """Snap an instant down to its minute boundary.
+
+    Series windows must align to fixed boundaries. Seeding from a raw `now`
+    carrying seconds and microseconds means two calls a moment apart share no
+    bucket timestamps at all, so identical windows return entirely different
+    points and the determinism guarantee is vacuous.
+    """
+    return moment.replace(second=0, microsecond=0)
+
+
 def series(start: datetime, end: datetime, step_seconds: int = 60) -> list:
-    """Return minute-bucketed telemetry across a window."""
+    """Return minute-bucketed telemetry across a window, aligned to the minute."""
     if end < start:
         raise ValueError("end must not be earlier than start")
+    start, end = floor_to_minute(start), floor_to_minute(end)
     points, cursor = [], start
     step = timedelta(seconds=step_seconds)
     while cursor <= end:
@@ -126,6 +138,33 @@ def health() -> dict:
         "deployed_at": active["deployed_at"],
         "checked_at": now["timestamp"],
     }
+
+
+def _sample_cache_path():
+    return state.STATE_PATH.parent / "error_sample.json"
+
+
+def historical_error_sample() -> dict:
+    """The exception that was raised while the service was faulty.
+
+    Log entries from a faulty revision must keep reporting the exception that
+    actually occurred then. Attaching a freshly captured sample to every
+    historical entry meant that once the fix was deployed, the old 4c21 errors
+    silently lost their ZeroDivisionError - erasing the very evidence the
+    investigation depended on. The first real capture is therefore cached and
+    reused for historical buckets.
+    """
+    import json
+
+    cache = _sample_cache_path()
+    if cache.exists():
+        return json.loads(cache.read_text())
+
+    sample = capture_error_sample()
+    if sample.get("exception"):
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(sample, indent=2))
+    return sample
 
 
 def capture_error_sample() -> dict:

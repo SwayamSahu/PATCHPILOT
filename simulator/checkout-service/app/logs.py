@@ -32,7 +32,7 @@ def generate(minutes: int = 45, max_entries: int = 400) -> list:
     """Build the recent log stream, newest last."""
     now = datetime.now(UTC)
     start = now - timedelta(minutes=minutes)
-    error_sample = telemetry.capture_error_sample()
+    error_sample = telemetry.historical_error_sample()
     entries = []
 
     for point in telemetry.series(start, now, step_seconds=60):
@@ -76,6 +76,11 @@ def generate(minutes: int = 45, max_entries: int = 400) -> list:
                 }
             )
 
+    # Bucket offsets push some entries past the final bucket's minute boundary.
+    # A log stream containing events from the future is obviously wrong and would
+    # undermine any timing correlation drawn from it.
+    horizon = now.isoformat()
+    entries = [entry for entry in entries if entry["timestamp"] <= horizon]
     entries.sort(key=lambda entry: entry["timestamp"])
     return entries[-max_entries:]
 
