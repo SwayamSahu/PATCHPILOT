@@ -62,13 +62,40 @@ def module():
         return _module
 
 
+class InvalidDeployment(RuntimeError):
+    """The proposed source could not be loaded, so it was not deployed."""
+
+
 def deploy_source(source: str):
-    """Write new source into the live working copy and reload it."""
+    """Validate new source, then publish it to the live working copy.
+
+    The source is loaded from a staging file *before* it replaces the live one.
+    Writing first and importing afterwards would leave a broken file on disk when
+    the import fails: the current process would keep serving the old module and
+    look fine, while the next restart would load the invalid file and break
+    checkout until someone reset the world. Validating first means a bad
+    deployment changes nothing at all.
+    """
     global _module
     with _lock:
         path = _live_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(source)
+        staging = path.with_name("checkout.staging.py")
+        staging.write_text(source)
+        try:
+            candidate = _load(staging)
+        except Exception as exc:
+            staging.unlink(missing_ok=True)
+            raise InvalidDeployment(f"proposed source could not be loaded: {exc}") from exc
+        finally:
+            sys.modules.pop(_MODULE_NAME, None)
+
+        for attr in ("Cart", "checkout", "compute_total"):
+            if not hasattr(candidate, attr):
+                staging.unlink(missing_ok=True)
+                raise InvalidDeployment(f"proposed source does not define {attr!r}")
+
+        staging.replace(path)  # atomic publish
         _module = _load(path)
         return _module
 
@@ -81,3 +108,21 @@ def reset():
 def live_source() -> str:
     """The source production is running right now."""
     return _live_path().read_text() if _live_path().exists() else CANONICAL_PATH.read_text()
+
+
+def verify_healthy() -> bool:
+    """Ask the live code whether it actually works, rather than trusting a flag.
+
+    A deployment is healthy if the code now running prices carts correctly - both
+    the zero-discount case that raises under the defect and a discounted case that
+    the defect silently overcharges. Deriving the flag from a smoke test closes the
+    hole where a deployment could record itself healthy and make telemetry report
+    recovery while production kept serving the broken module.
+    """
+    checkout = module()
+    try:
+        if checkout.compute_total(checkout.Cart(subtotal=100.0, discount=0.0)) != 100.0:
+            return False
+        return checkout.compute_total(checkout.Cart(subtotal=100.0, discount=0.25)) == 75.0
+    except Exception:
+        return False

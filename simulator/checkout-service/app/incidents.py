@@ -28,7 +28,7 @@ def get(incident_id: str = INCIDENT_ID) -> dict:
         "service": state.SERVICE_NAME,
         "severity": "SEV-1",
         "status": "resolved" if resolved else "open",
-        "opened_at": state.load().deployments[-1]["deployed_at"],
+        "opened_at": _fault_began_at(),
         "threshold": {
             "metric": "error_rate",
             "operator": ">",
@@ -44,6 +44,20 @@ def get(incident_id: str = INCIDENT_ID) -> dict:
             "Investigate and resolve the incident."
         ),
     }
+
+
+def _fault_began_at() -> str:
+    """When the fault was introduced, not when we last deployed something.
+
+    Reading the newest deployment meant that deploying the fix rewrote the same
+    incident's apparent start time to the moment of the fix, which would make any
+    correlation an agent had already drawn look wrong.
+    """
+    deployments = state.load().deployments
+    for deployment in deployments:
+        if not deployment["healthy"]:
+            return deployment["deployed_at"]
+    return deployments[-1]["deployed_at"]
 
 
 def list_all() -> list:
