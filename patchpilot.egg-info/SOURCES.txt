@@ -1,0 +1,8 @@
+LICENSE
+README.md
+pyproject.toml
+patchpilot.egg-info/PKG-INFO
+patchpilot.egg-info/SOURCES.txt
+patchpilot.egg-info/dependency_links.txt
+patchpilot.egg-info/requires.txt
+patchpilot.egg-info/top_level.txt
