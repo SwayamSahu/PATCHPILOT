@@ -65,6 +65,54 @@ most safety-critical path in the product — the approval resume. We therefore r
 - **MCP servers and the simulator in Python/FastAPI**, where the spec's intent
   (a real service the tools really call) is fully preserved.
 
+## 4a. Model choice: a free local model, and what it costs us
+
+PatchPilot runs on **Qwen3 8B served by Ollama** through its OpenAI-compatible
+endpoint. TrueForge accepts any such endpoint, so this needs no hosted account and
+no paid key: `ollama pull qwen3:8b` and the project runs.
+
+Qwen3-Coder was the first choice but its smallest build is 19 GB, which does not
+fit the 16 GB development machine. Tool-calling over the OpenAI-compatible API was
+verified empirically before committing to this path, not assumed.
+
+### The honest trade-off
+
+An 8B model is materially less reliable than a frontier model at exactly what this
+project asks of it: long multi-step tool use, reading evidence carefully, and
+writing a correct minimal patch. Pretending otherwise would be dishonest. The
+design compensates in four concrete ways, all of which are things a good agent
+system should do anyway:
+
+1. **Small tool surface per agent.** Each agent sees only its own connectors, with
+   `enable_tools` narrowing further. A model choosing among six relevant tools is
+   in far better shape than one choosing among thirty. TrueForge's deferred tool
+   loading keeps unused schemas out of context entirely.
+2. **The tools do the thinking that must be exact.** Error rates, correlation
+   windows, diffs, test results, and deployment state are computed by deterministic
+   MCP servers. The model decides *which question to ask*, never what the number is.
+   A weak model produces a slower investigation, not a wrong metric.
+3. **Verification is mechanical, not rhetorical.** A fix counts only if the
+   reproduction actually failed before it and the tests actually pass after it,
+   both executed in the sandbox. The model cannot talk its way to a green result.
+4. **The Validator is an independent check.** It re-reads the diff against the root
+   cause and flags scope creep, catching the characteristic small-model failure of
+   rewriting more than necessary.
+
+### What this does not weaken
+
+The safety boundary is entirely independent of model quality. Production is
+protected by a harness-level pause and a server-side single-use token, neither of
+which the model participates in. **A less capable model may investigate less well;
+it cannot deploy something dangerous.** That separation is the point of the design.
+
+### Context window
+
+Local models default to a small context (often 4k). The agent loop carries tool
+schemas plus accumulated results and will silently truncate, after which tool calls
+begin to fail in confusing ways. Ollama must be served with
+`OLLAMA_CONTEXT_LENGTH=32768`; this is set in `.env.example` and asserted by the
+setup script rather than left to chance.
+
 ## 5. The five agents
 
 | Agent | Job | Tools it can see | Can it write? |
