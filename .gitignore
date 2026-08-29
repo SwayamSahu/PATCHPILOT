@@ -24,3 +24,7 @@ trueforge-data/
 # Python build artefacts
 *.egg-info/
 *.egg
+
+# Runtime logs and pids
+.run/
+.trueforge/
