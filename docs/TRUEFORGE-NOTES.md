@@ -36,11 +36,18 @@ Turns chain via `previous_turn_id`. Sessions persist server-side — **this is
 Phase 14 (persistent session) for free**; a browser refresh replays events rather
 than restarting an investigation.
 
+> ⚠️ **Replay is paginated.** `GET /sessions/{id}/events` returns at most 100
+> events per page (`limit` defaults to and caps at 100) and pages backwards via
+> `pagination.next_page_token`. A replay that issues a single request recovers only
+> the newest page and silently loses the start of the investigation — precisely the
+> part a returning user needs. The orchestrator **must** follow
+> `next_page_token` to exhaustion before rendering. Asserted by a test in Block D.
+
 ### Endpoints we depend on
 ```
 POST   /api/v1/sessions                                   create session
 GET    /api/v1/sessions/{id}                              read session
-GET    /api/v1/sessions/{id}/events                       full event history (replay)
+GET    /api/v1/sessions/{id}/events                       event history (PAGINATED)
 POST   /api/v1/sessions/{id}/turns                        start OR resume a turn
 GET    /api/v1/sessions/{id}/turns/{tid}/events           turn event history
 GET    /api/v1/sessions/{id}/turns/{tid}/subscribe        SSE live stream
