@@ -20,3 +20,7 @@ htmlcov/
 simulator/.state/
 .workrepo/
 trueforge-data/
+
+# Python build artefacts
+*.egg-info/
+*.egg
