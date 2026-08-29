@@ -1,8 +1,9 @@
 # TrueForge — Verified API Notes (Phase 0)
 
 Everything here was read from the live TrueForge docs and the pinned OpenAPI spec
-(`docs/trueforge-openapi-0.2.0-rc.0.json`, `TrueForge API 0.2.0-rc.0`, OpenAPI 3.1.0)
-on 2026-08-30. **Nothing in this file is assumed.** PatchPilot is built against these
+(`docs/trueforge-openapi-0.2.0-rc.0.json`, `TrueForge API 0.2.0-rc.0`, OpenAPI 3.1.0),
+which is committed alongside these notes so any claim below can be checked against
+it directly. **Nothing in this file is assumed.** PatchPilot is built against these
 facts, not against the build spec's guesses.
 
 ## Runtime
