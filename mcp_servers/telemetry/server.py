@@ -33,7 +33,27 @@ server = MCPServer(
     ),
 )
 
+KNOWN_SERVICES = ("checkout-api",)
+
 Service = Annotated[str, Field(description="Service name, e.g. 'checkout-api'.")]
+
+
+def _check_service(service: str):
+    """Reject a service this environment does not monitor.
+
+    Every tool took a service argument and then ignored it, so a typo or a
+    genuinely different service silently returned checkout-api's telemetry. An
+    investigation could then attribute one service's health to another and be
+    confidently wrong. Unknown names now fail loudly.
+    """
+    if service and service not in KNOWN_SERVICES:
+        return {
+            "error": "unknown_service",
+            "detail": f"{service!r} is not monitored here. Known services: "
+            + ", ".join(KNOWN_SERVICES),
+            "known_services": list(KNOWN_SERVICES),
+        }
+    return None
 
 
 def _guard(call):
@@ -56,7 +76,7 @@ def _guard(call):
     "and the revision currently deployed."
 )
 def get_service_health(service: Service = "checkout-api") -> dict:
-    return _guard(lambda: simulator.get("/health"))
+    return _check_service(service) or _guard(lambda: simulator.get("/health"))
 
 
 @server.tool(
@@ -70,7 +90,9 @@ def get_metrics(
         int, Field(description="How far back to look, in minutes.", ge=1, le=720)
     ] = 45,
 ) -> dict:
-    return _guard(lambda: simulator.get("/metrics", params={"minutes": minutes}))
+    return _check_service(service) or _guard(
+        lambda: simulator.get("/metrics", params={"minutes": minutes})
+    )
 
 
 @server.tool(
@@ -89,7 +111,7 @@ def query_logs(
         params["query"] = query
     if level:
         params["level"] = level
-    return _guard(lambda: simulator.get("/logs", params=params))
+    return _check_service(service) or _guard(lambda: simulator.get("/logs", params=params))
 
 
 @server.tool(
@@ -98,7 +120,7 @@ def query_logs(
     "Correlate these timestamps against when metrics degraded."
 )
 def get_recent_deployments(service: Service = "checkout-api") -> dict:
-    return _guard(lambda: simulator.get("/deployments"))
+    return _check_service(service) or _guard(lambda: simulator.get("/deployments"))
 
 
 @server.tool(description="Full details of a specific incident, including the breached threshold.")
@@ -113,7 +135,7 @@ def get_incident_details(
     "exception type, source file, line number, and the offending source line."
 )
 def get_error_samples(service: Service = "checkout-api") -> dict:
-    return _guard(lambda: simulator.get("/errors/samples"))
+    return _check_service(service) or _guard(lambda: simulator.get("/errors/samples"))
 
 
 def main() -> None:

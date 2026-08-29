@@ -88,3 +88,18 @@ def test_tools_report_a_clear_error_when_production_is_unreachable(monkeypatch):
     result = telemetry_server.get_service_health()
     assert result["error"] == "production_environment_unreachable"
     assert "could not reach" in result["detail"]
+
+
+def test_an_unknown_service_is_rejected_rather_than_silently_answered():
+    """Returning checkout-api's telemetry under another name invents evidence."""
+    for tool in (
+        telemetry_server.get_service_health,
+        telemetry_server.get_recent_deployments,
+        telemetry_server.get_error_samples,
+    ):
+        result = tool(service="payments-api")
+        assert result["error"] == "unknown_service"
+        assert "checkout-api" in result["known_services"]
+
+    assert telemetry_server.get_metrics(service="typo-api")["error"] == "unknown_service"
+    assert telemetry_server.query_logs(service="typo-api")["error"] == "unknown_service"
