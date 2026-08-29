@@ -170,6 +170,53 @@ def test_invalid_branch_names_are_refused(repo):
 
 
 # --------------------------------------------------------------------------
+# Targeted edits
+# --------------------------------------------------------------------------
+
+
+def test_edit_file_replaces_a_unique_string(repo):
+    result = repo_server.edit_file(
+        path="app/checkout.py",
+        old_string="return subtotal / discount",
+        new_string="return subtotal * (1 - discount)",
+    )
+    assert result["replaced"] is True
+    assert "subtotal * (1 - discount)" in (repo / "app" / "checkout.py").read_text()
+
+
+def test_edit_file_refuses_an_ambiguous_match(repo):
+    """Applying to the first hit is rarely what was meant, so refuse instead."""
+    (repo / "app" / "dup.py").write_text("x = 1\nx = 1\n")
+    result = repo_server.edit_file(path="app/dup.py", old_string="x = 1", new_string="x = 2")
+    assert result["error"] == "repository_error"
+    assert "appears 2 times" in result["detail"]
+    assert (repo / "app" / "dup.py").read_text() == "x = 1\nx = 1\n"
+
+
+def test_edit_file_reports_a_missing_match_rather_than_guessing(repo):
+    result = repo_server.edit_file(
+        path="app/checkout.py", old_string="not in the file", new_string="x"
+    )
+    assert result["error"] == "repository_error"
+    assert "not found" in result["detail"]
+
+
+def test_edit_file_is_subject_to_the_path_jail(repo):
+    assert repo_server.edit_file(path="../escape.py", old_string="a", new_string="b")["error"]
+    assert repo_server.edit_file(path=".env", old_string="GITHUB_TOKEN", new_string="x")["error"]
+
+
+def test_append_to_file_preserves_existing_content(repo):
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("def test_one():\n    assert True\n")
+    repo_server.append_to_file(
+        path="tests/test_x.py", content="def test_two():\n    assert True\n"
+    )
+    body = (repo / "tests" / "test_x.py").read_text()
+    assert "def test_one" in body and "def test_two" in body
+
+
+# --------------------------------------------------------------------------
 # Tests are really executed
 # --------------------------------------------------------------------------
 

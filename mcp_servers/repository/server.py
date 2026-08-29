@@ -131,6 +131,32 @@ def write_file(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+    description="Replace one exact, unique piece of text in a file. Prefer this "
+    "over write_file: it keeps the change minimal and you only have to restate "
+    "the lines you are changing. The old text must appear exactly once.",
+)
+def edit_file(
+    path: Annotated[str, Field(description="Repo-relative path to edit.")],
+    old_string: Annotated[str, Field(description="Exact text to replace, including indentation.")],
+    new_string: Annotated[str, Field(description="Replacement text.")],
+) -> dict:
+    return _guard(lambda: gitrepo.edit_file(path, old_string, new_string))
+
+
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+    description="Append text to the end of a file, creating it if needed. Use this "
+    "to add a regression test without rewriting the tests already there.",
+)
+def append_to_file(
+    path: Annotated[str, Field(description="Repo-relative path.")],
+    content: Annotated[str, Field(description="Text to append.")],
+) -> dict:
+    return _guard(lambda: gitrepo.append_to_file(path, content))
+
+
+@server.tool(
     annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Run the repository's test suite and return the real result. This "
     "is what decides whether a fix works."

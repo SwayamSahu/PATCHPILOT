@@ -299,6 +299,72 @@ def write_file(relative: str, content: str) -> dict:
     }
 
 
+def edit_file(relative: str, old_string: str, new_string: str) -> dict:
+    """Replace one exact occurrence of `old_string` with `new_string`.
+
+    Preferred over rewriting a whole file. Two reasons, and both matter:
+
+    * It makes an over-broad change hard to perform by accident. The edit is
+      confined to text the caller had to quote exactly, so a minimal fix stays
+      minimal and the diff stays reviewable.
+    * It is far more reliable for a smaller model, which can restate one line
+      accurately but tends to drop or mangle content when asked to reproduce an
+      entire file.
+
+    The match must be unique. An ambiguous edit is refused rather than applied to
+    the first hit, because "the first one" is rarely the one that was meant.
+    """
+    require_ready()
+    path = resolve_path(relative)
+    if not path.is_file():
+        raise RepositoryError(f"{relative!r} does not exist in the repository")
+    if not old_string:
+        raise RepositoryError("old_string must not be empty")
+
+    content = path.read_text()
+    occurrences = content.count(old_string)
+    if occurrences == 0:
+        raise RepositoryError(
+            f"the text to replace was not found in {relative!r}. Read the file again "
+            "and quote the exact text, including indentation."
+        )
+    if occurrences > 1:
+        raise RepositoryError(
+            f"the text to replace appears {occurrences} times in {relative!r}. "
+            "Include surrounding lines to make it unique."
+        )
+
+    path.write_text(content.replace(old_string, new_string))
+    return {
+        "path": relative,
+        "replaced": True,
+        "lines_before": content.count("\n") + 1,
+        "lines_after": content.replace(old_string, new_string).count("\n") + 1,
+    }
+
+
+def append_to_file(relative: str, content: str) -> dict:
+    """Append text to a file, creating it if absent.
+
+    Adding a regression test is an append, not a rewrite. Expressing it that way
+    means an agent adding a test cannot accidentally delete the tests already
+    there.
+    """
+    require_ready()
+    path = resolve_path(relative)
+    existed = path.is_file()
+    before = path.read_text() if existed else ""
+    if not before or before.endswith("\n\n"):
+        separator = ""
+    elif before.endswith("\n"):
+        separator = "\n"
+    else:
+        separator = "\n\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(before + separator + content.rstrip("\n") + "\n")
+    return {"path": relative, "created": not existed, "appended_bytes": len(content.encode())}
+
+
 def commit(message: str) -> dict:
     require_ready()
     if not message.strip():
