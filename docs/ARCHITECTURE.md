@@ -72,8 +72,26 @@ endpoint. TrueForge accepts any such endpoint, so this needs no hosted account a
 no paid key: `ollama pull qwen3:8b` and the project runs.
 
 Qwen3-Coder was the first choice but its smallest build is 19 GB, which does not
-fit the 16 GB development machine. Tool-calling over the OpenAI-compatible API was
-verified empirically before committing to this path, not assumed.
+fit the 16 GB development machine, so Qwen3 8B was selected instead.
+
+### Verified, not assumed
+
+Before committing the architecture to this model, its ability to sustain a
+multi-step tool loop was tested directly against the OpenAI-compatible endpoint
+with the real telemetry tool schemas. Given only "checkout-api is failing,
+investigate", it ran unaided:
+
+```
+step 0  get_service_health(service="checkout-api")
+step 1  get_recent_deployments(service="checkout-api")
+step 2  query_logs(service="checkout-api", query="error revision 4c21")
+step 3  root cause: ZeroDivisionError introduced by revision 4c21,
+        checkout.py line 42, in the simplified discount calculation
+```
+
+That is the correct answer, reached by correct correlation, on a free local model.
+It is a promising signal rather than a guarantee — the full workflow is longer and
+harder than this probe — but the approach is sound enough to build on.
 
 ### The honest trade-off
 
