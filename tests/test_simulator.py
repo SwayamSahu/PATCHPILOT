@@ -194,14 +194,33 @@ def test_reset_restores_the_broken_world(client):
 # --------------------------------------------------------------------------
 
 
-def test_a_deployment_cannot_declare_itself_healthy(client):
-    """Health is verified against the running code, never taken on trust."""
+def test_a_deployment_that_ships_no_code_is_rejected(client):
+    """A deployment must carry code, or the ledger would name a revision that is
+    not the one actually running."""
     response = client.post(
         "/_control/deploy",
         json={
             "revision_id": "4c22",
             "summary": "claims to fix things but ships no code",
+            "deployed_by": "patchpilot",
+        },
+    )
+    assert response.status_code == 422
+    assert client.get("/health").json()["deployed_revision"] == "4c21"
+
+
+def test_a_deployment_cannot_declare_itself_healthy(client):
+    """Health is verified against the running code, never taken on trust."""
+    from app import live
+
+    unchanged = live.CANONICAL_PATH.read_text()  # still faulty
+    response = client.post(
+        "/_control/deploy",
+        json={
+            "revision_id": "4c22",
+            "summary": "redeploys the same broken code",
             "healthy": True,  # ignored: there is no such field
+            "source": unchanged,
             "deployed_by": "patchpilot",
         },
     )
@@ -270,3 +289,32 @@ def test_incident_opening_time_is_when_the_fault_began(client):
 
     _deploy_fix(client)
     assert client.get("/incidents/INC-4021").json()["opened_at"] == opened_at
+
+
+def test_non_finite_prices_are_rejected_before_pricing(client):
+    """NaN satisfies the range bounds but would escape as a malformed response."""
+    # Sent as raw JSON: json.dumps refuses to emit these, but a client can.
+    for raw in (b'{"subtotal": NaN, "discount": 0.0}', b'{"subtotal": 1e400, "discount": 0.0}'):
+        response = client.post(
+            "/checkout", content=raw, headers={"content-type": "application/json"}
+        )
+        assert response.status_code == 422, f"expected rejection for {raw!r}"
+
+
+def test_errors_are_attributed_to_the_revision_that_raised_them(client):
+    """A healthy revision's residual errors must not borrow the fault's exception."""
+    entries = client.get("/logs", params={"level": "ERROR", "limit": 200}).json()["entries"]
+    for entry in entries:
+        if entry["revision_id"] == "4c21":
+            assert entry["exception"] == "ZeroDivisionError"
+        else:
+            assert entry["exception"] is None, "healthy revisions must not report the fault"
+
+
+def test_reset_clears_the_cached_error_sample(client):
+    from app import telemetry
+
+    client.get("/logs", params={"level": "ERROR", "limit": 5})
+    assert telemetry._sample_cache_path().exists()
+    client.post("/_control/reset")
+    assert not telemetry._sample_cache_path().exists()

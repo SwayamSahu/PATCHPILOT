@@ -23,6 +23,14 @@ _INFO_TEMPLATES = (
 )
 
 
+def _revision_was_healthy(revision_id: str) -> bool:
+    """Whether the named revision was healthy, per the deployment ledger."""
+    for deployment in state.load().deployments:
+        if deployment["revision_id"] == revision_id:
+            return bool(deployment["healthy"])
+    return True
+
+
 def _order_id(at: datetime, index: int) -> str:
     seed = f"{at.isoformat()}:{index}".encode()
     return "ord_" + hashlib.sha256(seed).hexdigest()[:10]
@@ -32,7 +40,6 @@ def generate(minutes: int = 45, max_entries: int = 400) -> list:
     """Build the recent log stream, newest last."""
     now = datetime.now(UTC)
     start = now - timedelta(minutes=minutes)
-    error_sample = telemetry.historical_error_sample()
     entries = []
 
     for point in telemetry.series(start, now, step_seconds=60):
@@ -57,6 +64,13 @@ def generate(minutes: int = 45, max_entries: int = 400) -> list:
                 }
             )
 
+        # Errors are attributed to the revision that actually raised them. A
+        # healthy revision's residual errors are ordinary failures, not the
+        # ZeroDivisionError from the faulty window; labelling them all the same
+        # way would invent evidence for a defect that was not running.
+        faulty_window = not _revision_was_healthy(revision)
+        error_sample = telemetry.historical_error_sample() if faulty_window else {}
+
         # Error volume tracks the measured error count, capped so a minute of a
         # 31% error rate does not drown the stream.
         for index in range(min(point["error_count"], 3)):
@@ -68,11 +82,11 @@ def generate(minutes: int = 45, max_entries: int = 400) -> list:
                     "service": state.SERVICE_NAME,
                     "revision_id": revision,
                     "message": f"checkout failed order_id={_order_id(at, 90 + index)}",
-                    "exception": error_sample.get("exception"),
-                    "exception_message": error_sample.get("message"),
-                    "file": error_sample.get("file"),
-                    "line": error_sample.get("line"),
-                    "stacktrace": error_sample.get("stacktrace"),
+                    "exception": error_sample.get("exception") if faulty_window else None,
+                    "exception_message": error_sample.get("message") if faulty_window else None,
+                    "file": error_sample.get("file") if faulty_window else None,
+                    "line": error_sample.get("line") if faulty_window else None,
+                    "stacktrace": error_sample.get("stacktrace") if faulty_window else None,
                 }
             )
 

@@ -144,6 +144,15 @@ def _sample_cache_path():
     return state.STATE_PATH.parent / "error_sample.json"
 
 
+def clear_sample_cache() -> None:
+    """Drop the cached error sample so a reset world recaptures its own.
+
+    Left in place, a cache from a previous run would describe an exception that
+    the freshly reset code no longer raises.
+    """
+    _sample_cache_path().unlink(missing_ok=True)
+
+
 def historical_error_sample() -> dict:
     """The exception that was raised while the service was faulty.
 

@@ -95,8 +95,20 @@ def deploy_source(source: str):
                 staging.unlink(missing_ok=True)
                 raise InvalidDeployment(f"proposed source does not define {attr!r}")
 
+        previous = path.read_text() if path.exists() else None
         staging.replace(path)  # atomic publish
-        _module = _load(path)
+        try:
+            _module = _load(path)
+        except Exception as exc:
+            # Validating from the staging path is not a guarantee: source whose
+            # behaviour depends on __file__ can load there and fail here. Roll the
+            # previous file back so a failed deployment leaves nothing behind.
+            if previous is not None:
+                path.write_text(previous)
+                _module = _load(path)
+            raise InvalidDeployment(
+                f"source loaded during validation but failed once published: {exc}"
+            ) from exc
         return _module
 
 

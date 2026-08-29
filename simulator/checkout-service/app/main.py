@@ -15,7 +15,9 @@ import logging
 import threading
 from datetime import UTC, datetime, timedelta
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import incidents, live, logs, revisions, state, telemetry
@@ -32,9 +34,40 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Return a clean 422 without echoing the offending input back.
+
+    FastAPI's default handler serialises the rejected value into the error body.
+    For a non-finite float that serialisation itself fails, so a request carrying
+    NaN produced a 500 from the error path rather than the 422 the validator had
+    correctly decided on. Reporting the location and reason - and never the raw
+    value - keeps the rejection clean whatever was sent.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {"loc": [str(part) for part in error["loc"]], "msg": error["msg"],
+                 "type": error["type"]}
+                for error in exc.errors()
+            ]
+        },
+    )
+
+
 class CheckoutRequest(BaseModel):
-    subtotal: float = Field(..., ge=0, description="Cart subtotal in dollars.")
-    discount: float = Field(0.0, ge=0.0, lt=1.0, description="Fractional discount.")
+    """A cart to price.
+
+    `allow_inf_nan=False` matters: NaN and infinity satisfy the range bounds, and
+    a total of NaN would escape the endpoint's handler and fail during JSON
+    serialisation, producing a malformed response instead of a clean 4xx.
+    """
+
+    subtotal: float = Field(..., ge=0, allow_inf_nan=False, description="Cart subtotal.")
+    discount: float = Field(
+        0.0, ge=0.0, lt=1.0, allow_inf_nan=False, description="Fractional discount."
+    )
     currency: str = Field("USD", min_length=3, max_length=3)
 
 
@@ -50,7 +83,13 @@ class DeployRequest(BaseModel):
 
     revision_id: str = Field(..., min_length=1)
     summary: str = Field(..., min_length=1)
-    source: str | None = Field(None, description="New checkout.py contents to apply.")
+    source: str = Field(
+        ...,
+        min_length=1,
+        description="New checkout.py contents to apply. Required: a deployment "
+        "that ships no code would leave the ledger naming a revision that is not "
+        "the one actually running.",
+    )
     commit_sha: str | None = None
     deployed_by: str = "ci"
 
@@ -137,10 +176,17 @@ def get_incident(incident_id: str) -> dict:
 
 @app.post("/_control/reset")
 def control_reset() -> dict:
-    """Return production to the opening scene: broken, running 4c21."""
-    _restore_baseline_source()
-    fresh = state.reset()
-    return {"status": "reset", "deployed_revision": fresh.current_revision_id}
+    """Return production to the opening scene: broken, running 4c21.
+
+    Takes the deploy lock. Without it a reset could interleave with a deployment
+    and leave the restored baseline source paired with a ledger describing the
+    deployment that raced it.
+    """
+    with _DEPLOY_LOCK:
+        _restore_baseline_source()
+        telemetry.clear_sample_cache()
+        fresh = state.reset()
+        return {"status": "reset", "deployed_revision": fresh.current_revision_id}
 
 
 @app.post("/_control/deploy")
@@ -153,11 +199,10 @@ def control_deploy(request: DeployRequest) -> dict:
     running.
     """
     with _DEPLOY_LOCK:
-        if request.source is not None:
-            try:
-                _apply_source(request.source)
-            except live.InvalidDeployment as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            _apply_source(request.source)
+        except live.InvalidDeployment as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         healthy = live.verify_healthy()
         record = state.record_deployment(
