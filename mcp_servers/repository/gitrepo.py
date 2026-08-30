@@ -269,9 +269,26 @@ def read_file_at(commit_sha: str, relative: str) -> str:
 
 
 def working_diff() -> dict:
-    """The uncommitted change set — what the agent has actually written."""
+    """The uncommitted change set — what the agent has written but not committed."""
     require_ready()
     return {"diff": git_or_raise("diff"), "staged": git_or_raise("diff", "--cached")}
+
+
+def branch_diff(base: str | None = None) -> str:
+    """Everything this branch changes relative to its base, committed or not.
+
+    The whole change set, which is what "did the agent make the fix?" actually
+    means. Looking only at uncommitted changes reports an empty diff the moment
+    the agent commits - and committing is the normal, correct thing for it to do,
+    so that reading fails a stage that in fact succeeded.
+    """
+    require_ready()
+    base = base or base_branch()
+    committed = run_git("diff", f"{base}...HEAD")
+    uncommitted = run_git("diff", base)
+    return (committed.stdout if committed.ok else "") or (
+        uncommitted.stdout if uncommitted.ok else ""
+    )
 
 
 def current_branch() -> str:

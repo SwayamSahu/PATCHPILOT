@@ -73,11 +73,17 @@ def verify_reproduction(events: list) -> Verdict:
 
 
 def verify_patch(expected_files: list | None = None) -> Verdict:
-    """Confirm a change really exists in the working tree."""
+    """Confirm the change really exists on the branch.
+
+    Measured against the base branch rather than the working tree. An agent that
+    commits its work leaves a clean tree, and reading only uncommitted changes
+    would report "no changes" for a stage that had actually succeeded — which is
+    exactly what happened on the first full run.
+    """
     problems, facts = [], {}
     try:
         branch = gitrepo.current_branch()
-        diff = gitrepo.working_diff()["diff"]
+        diff = gitrepo.branch_diff()
         facts["branch"] = branch
     except RepositoryError as exc:
         return Verdict.failed("could not inspect the repository", [str(exc)])
@@ -85,7 +91,7 @@ def verify_patch(expected_files: list | None = None) -> Verdict:
     if branch in {"main", "master"}:
         problems.append(f"work is on {branch!r}; a fix must live on its own branch")
     if not diff.strip():
-        problems.append("no changes are present in the working tree")
+        problems.append("the branch contains no changes relative to its base")
 
     changed = [
         line.split(" b/")[-1]
@@ -125,8 +131,14 @@ def verify_tests(target: str = "tests/test_simulator.py") -> Verdict:
     )
 
 
-def verify_regression_test(diff_text: str) -> Verdict:
-    """A fix without a test that would have caught it is not finished."""
+def verify_regression_test(diff_text: str, test_path: str | None = None) -> Verdict:
+    """A fix without a test that would have caught it is not finished.
+
+    The test must also land where the suite will actually collect it. On the first
+    full run the agent wrote a perfectly good test to
+    `simulator/checkout-service/tests/`, outside the configured test paths, where
+    nothing would ever run it — a test that cannot fail is not protection.
+    """
     added = [
         line[1:]
         for line in diff_text.splitlines()
@@ -138,6 +150,23 @@ def verify_regression_test(diff_text: str) -> Verdict:
             "no regression test was added",
             ["the diff adds no new test function"],
         )
+
+    if test_path:
+        touched = [
+            line.split(" b/")[-1]
+            for line in diff_text.splitlines()
+            if line.startswith("diff --git")
+        ]
+        if not any(path == test_path for path in touched):
+            return Verdict.failed(
+                f"the regression test is not in {test_path}",
+                [
+                    f"a test was added, but to {touched} rather than {test_path!r}",
+                    "a test outside the collected paths never runs, so it protects nothing",
+                ],
+                {"files_changed": touched},
+            )
+
     return Verdict(
         ok=True,
         summary=f"{len(added_tests)} regression test(s) added",

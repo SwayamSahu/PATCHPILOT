@@ -162,3 +162,51 @@ def test_an_unidentifiable_tool_result_is_dropped_rather_than_shown_blank():
     from patchpilot.events import from_harness_event
 
     assert from_harness_event({"type": "tool.response"}, "detective", {}) == []
+
+
+# --------------------------------------------------------------------------
+# Regressions from the first full pipeline run
+# --------------------------------------------------------------------------
+
+
+def test_a_committed_patch_still_verifies(monkeypatch):
+    """Committing is the correct thing for an agent to do, and used to fail.
+
+    verify_patch read only uncommitted changes, so the moment the agent committed
+    its work the tree was clean and a stage that had genuinely succeeded was
+    reported as having produced nothing.
+    """
+    monkeypatch.setattr(verification.gitrepo, "current_branch", lambda: "fix/checkout-discount")
+    monkeypatch.setattr(
+        verification.gitrepo, "branch_diff",
+        lambda base=None: (
+            "diff --git a/simulator/checkout-service/app/checkout.py "
+            "b/simulator/checkout-service/app/checkout.py\n"
+            "-    return round(cart.subtotal / cart.discount, 2)\n"
+            "+    return round(cart.subtotal * (1 - cart.discount), 2)\n"
+        ),
+    )
+    verdict = verification.verify_patch(expected_files=["checkout.py"])
+    assert verdict.ok is True, verdict.problems
+
+
+def test_a_test_written_outside_the_collected_paths_is_rejected():
+    """A test that never runs protects nothing."""
+    diff = (
+        "diff --git a/simulator/checkout-service/tests/test_simulator.py "
+        "b/simulator/checkout-service/tests/test_simulator.py\n"
+        "+def test_zero_discount(client):\n"
+        "+    assert True\n"
+    )
+    verdict = verification.verify_regression_test(diff, "tests/test_simulator.py")
+    assert verdict.ok is False
+    assert "never runs" in " ".join(verdict.problems)
+
+
+def test_a_test_in_the_right_place_is_accepted():
+    diff = (
+        "diff --git a/tests/test_simulator.py b/tests/test_simulator.py\n"
+        "+def test_zero_discount(client):\n"
+        "+    assert True\n"
+    )
+    assert verification.verify_regression_test(diff, "tests/test_simulator.py").ok is True
