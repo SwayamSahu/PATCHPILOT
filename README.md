@@ -186,10 +186,6 @@ HTTP hop in the middle of the safety-critical path bought nothing. Reasoning in
 
 Full finding-by-finding record: **[docs/QODO.md](docs/QODO.md)**.
 
-## Demo
-
-Three-minute script with exact commands: **[docs/DEMO.md](docs/DEMO.md)**.
-
 ## Screenshots
 
 The interface is three panels and one control:
@@ -205,8 +201,7 @@ The interface is three panels and one control:
 - **Bottom — the approval gate.** Appears only while the harness is genuinely
   paused, states that the action is irreversible, and requires a confirm step.
 
-Images are captured from a live run rather than mocked up; see
-[docs/DEMO.md](docs/DEMO.md) for the moments worth capturing.
+Images are captured from a live run rather than mocked up.
 
 <img width="1511" height="718" alt="image" src="https://github.com/user-attachments/assets/885fb1f1-e8a8-4bc6-b198-91e53db9730d" />
 <img width="1511" height="903" alt="image" src="https://github.com/user-attachments/assets/e2c6c5cd-2c60-4d7b-a582-0d102032412f" />
