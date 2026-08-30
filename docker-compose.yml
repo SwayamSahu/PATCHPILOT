@@ -1,0 +1,133 @@
+# PatchPilot's own services, containerised.
+#
+# What is here: the simulated production environment, the three MCP servers, the
+# orchestrator API, and the web UI.
+#
+# What is deliberately NOT here: the TrueForge harness and Ollama. Both run on
+# the host, and both are reached through host.docker.internal.
+#
+#   * TrueForge ships its own Docker Compose stack (Postgres + Redis). Nesting
+#     that inside this one would give you two databases to reason about for a
+#     demo that needs neither.
+#   * Ollama wants the GPU. On Apple Silicon a containerised Ollama falls back to
+#     CPU and the whole pipeline becomes unusably slow.
+#
+# So this file is for the parts where a container genuinely helps. `make demo`
+# remains the simpler path and is what the README documents first.
+#
+#   docker compose up --build
+#
+# Prerequisites on the host: `ollama serve` with OLLAMA_CONTEXT_LENGTH=16384, and
+# `npx @truefoundry/trueforge@latest` (or `make harness`).
+
+services:
+  simulator:
+    build: .
+    image: patchpilot-python
+    command: >
+      python -m uvicorn app.main:app
+      --app-dir simulator/checkout-service --host 0.0.0.0 --port 8000
+    environment:
+      SIMULATOR_STATE_PATH: /state/state.json
+      SIMULATOR_RECOVERY_SECONDS: "24"
+    volumes:
+      - simulator-state:/state
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mcp-telemetry:
+    build: .
+    image: patchpilot-python
+    command: python -m mcp_servers.telemetry.server
+    environment:
+      SIMULATOR_URL: http://simulator:8000
+      MCP_TELEMETRY_PORT: "8101"
+    # Published to the host because the harness runs there and connects in.
+    ports:
+      - "8101:8101"
+    depends_on:
+      simulator:
+        condition: service_healthy
+
+  mcp-repository:
+    build: .
+    image: patchpilot-python
+    command: python -m mcp_servers.repository.server
+    environment:
+      MCP_REPOSITORY_PORT: "8102"
+      WORK_REPO_PATH: /workrepo
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_OWNER: ${GITHUB_OWNER:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      PATCHPILOT_BASE_BRANCH: ${PATCHPILOT_BASE_BRANCH:-main}
+    volumes:
+      - work-repo:/workrepo
+    ports:
+      - "8102:8102"
+
+  mcp-deployment:
+    build: .
+    image: patchpilot-python
+    command: python -m mcp_servers.deployment.server
+    environment:
+      SIMULATOR_URL: http://simulator:8000
+      MCP_DEPLOYMENT_PORT: "8103"
+      WORK_REPO_PATH: /workrepo
+      APPROVAL_STORE_PATH: /state/approvals.json
+    volumes:
+      - work-repo:/workrepo
+      # The approval store is shared with the API, which is the only thing that
+      # writes to it. Deployment reads and spends what a human created there.
+      - simulator-state:/state
+    ports:
+      - "8103:8103"
+    depends_on:
+      simulator:
+        condition: service_healthy
+
+  api:
+    build: .
+    image: patchpilot-python
+    command: >
+      python -m uvicorn patchpilot.main:app
+      --app-dir apps/api --host 0.0.0.0 --port 8080
+    environment:
+      SIMULATOR_URL: http://simulator:8000
+      TRUEFORGE_API_BASE: http://host.docker.internal:8790/api/v1
+      WORK_REPO_PATH: /workrepo
+      APPROVAL_STORE_PATH: /state/approvals.json
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_OWNER: ${GITHUB_OWNER:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      PATCHPILOT_BASE_BRANCH: ${PATCHPILOT_BASE_BRANCH:-main}
+    volumes:
+      - work-repo:/workrepo
+      - simulator-state:/state
+      - workflow-state:/app/.run
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      simulator:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_API_URL: http://127.0.0.1:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  simulator-state:
+  work-repo:
+  workflow-state:

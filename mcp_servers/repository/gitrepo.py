@@ -42,6 +42,36 @@ class PathNotAllowed(RepositoryError):
     """The requested path is outside the repo or on the refused list."""
 
 
+class WouldBreakFile(RepositoryError):
+    """The write would leave a Python file that cannot be parsed."""
+
+
+def _check_parses(relative: str, content: str) -> None:
+    """Refuse a write that leaves a Python file unparseable.
+
+    Observed failure this prevents: an agent appended a test with `def` missing
+    from the signature. The file stopped parsing, so the whole suite failed to
+    collect - and because appending can only add text, the agent could not undo
+    it. It re-appended a corrected copy six times while the broken line sat there,
+    and would have exhausted its iteration budget without ever recovering.
+
+    Rejecting the write keeps the file in a state the agent can still reason
+    about, and the syntax error is reported back precisely enough to fix.
+    """
+    if not relative.endswith(".py"):
+        return
+    import ast
+
+    try:
+        ast.parse(content)
+    except SyntaxError as exc:
+        raise WouldBreakFile(
+            f"this change would leave {relative!r} unparseable: {exc.msg} at line {exc.lineno}. "
+            "The file was left unchanged. Check the text you are writing - a common "
+            "cause is a function signature missing its 'def'."
+        ) from None
+
+
 @dataclass(frozen=True)
 class CommandResult:
     exit_code: int
@@ -269,9 +299,26 @@ def read_file_at(commit_sha: str, relative: str) -> str:
 
 
 def working_diff() -> dict:
-    """The uncommitted change set — what the agent has actually written."""
+    """The uncommitted change set — what the agent has written but not committed."""
     require_ready()
     return {"diff": git_or_raise("diff"), "staged": git_or_raise("diff", "--cached")}
+
+
+def branch_diff(base: str | None = None) -> str:
+    """Everything this branch changes relative to its base, committed or not.
+
+    The whole change set, which is what "did the agent make the fix?" actually
+    means. Looking only at uncommitted changes reports an empty diff the moment
+    the agent commits - and committing is the normal, correct thing for it to do,
+    so that reading fails a stage that in fact succeeded.
+    """
+    require_ready()
+    base = base or base_branch()
+    committed = run_git("diff", f"{base}...HEAD")
+    uncommitted = run_git("diff", base)
+    return (committed.stdout if committed.ok else "") or (
+        uncommitted.stdout if uncommitted.ok else ""
+    )
 
 
 def current_branch() -> str:
@@ -325,6 +372,7 @@ def write_file(relative: str, content: str) -> dict:
     path = resolve_path(relative)
     existed = path.is_file()
     before = path.read_text() if existed else ""
+    _check_parses(relative, content)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     return {
@@ -370,12 +418,14 @@ def edit_file(relative: str, old_string: str, new_string: str) -> dict:
             "Include surrounding lines to make it unique."
         )
 
-    path.write_text(content.replace(old_string, new_string))
+    updated = content.replace(old_string, new_string)
+    _check_parses(relative, updated)
+    path.write_text(updated)
     return {
         "path": relative,
         "replaced": True,
         "lines_before": content.count("\n") + 1,
-        "lines_after": content.replace(old_string, new_string).count("\n") + 1,
+        "lines_after": updated.count("\n") + 1,
     }
 
 
@@ -396,8 +446,10 @@ def append_to_file(relative: str, content: str) -> dict:
         separator = "\n"
     else:
         separator = "\n\n"
+    result = before + separator + content.rstrip("\n") + "\n"
+    _check_parses(relative, result)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(before + separator + content.rstrip("\n") + "\n")
+    path.write_text(result)
     return {"path": relative, "created": not existed, "appended_bytes": len(content.encode())}
 
 

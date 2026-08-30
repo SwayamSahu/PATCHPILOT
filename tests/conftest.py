@@ -45,6 +45,12 @@ def live_simulator(tmp_path_factory):
     state_dir = tmp_path_factory.mktemp("simstate")
     env = {
         **os.environ,
+        # Seed production from a faulty baseline the tests own, not from the
+        # versioned checkout.py. These tests assert production starts broken, so
+        # reading the live file would make them fail the moment the bug is fixed —
+        # which is exactly what the agent is supposed to do, and what the workflow
+        # needs a green suite to confirm.
+        "SIMULATOR_BASELINE_SOURCE": str(REPO_ROOT / "tests" / "fixtures" / "checkout_faulty.py"),
         "SIMULATOR_STATE_PATH": str(state_dir / "state.json"),
         "SIMULATOR_RECOVERY_SECONDS": "24",
         "PYTHONPATH": str(REPO_ROOT / "simulator" / "checkout-service"),

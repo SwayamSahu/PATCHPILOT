@@ -9,6 +9,8 @@ no argument, retry, forged value, or replay changes that.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -37,10 +39,12 @@ def _isolated_store(tmp_path, monkeypatch, live_simulator):
 _ARTIFACTS: dict = {}
 
 
-def _fixed_source() -> str:
-    from app import live
+FAULTY_BASELINE = Path(__file__).parent / "fixtures" / "checkout_faulty.py"
 
-    source = live.CANONICAL_PATH.read_text()
+
+def _fixed_source() -> str:
+    """The faulty baseline with the defect corrected, independent of git state."""
+    source = FAULTY_BASELINE.read_text()
     return source.replace("cart.subtotal / cart.discount", "cart.subtotal * (1 - cart.discount)")
 
 

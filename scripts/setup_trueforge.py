@@ -29,7 +29,19 @@ SANDBOX_CONTEXT = 32768
 
 
 def _call(method: str, path: str, **kwargs) -> httpx.Response:
-    return httpx.request(method, f"{API}{path}", timeout=TIMEOUT, **kwargs)
+    """Call the harness, turning an unreachable server into a clear failure.
+
+    A connection error here means the harness is not running, which is an
+    ordinary situation. Reporting it as a stack trace helps nobody.
+    """
+    try:
+        return httpx.request(method, f"{API}{path}", timeout=TIMEOUT, **kwargs)
+    except httpx.HTTPError as exc:
+        raise SystemExit(
+            f"error: cannot reach the TrueForge harness at {API}\n"
+            f"       {exc}\n"
+            "       start it with 'make harness'"
+        ) from None
 
 
 def _ok(response: httpx.Response) -> bool:

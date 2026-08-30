@@ -234,7 +234,7 @@ def develop(root_cause: dict) -> dict:
     )
 
     tests = verification.verify_tests(TEST_PATH)
-    regression = verification.verify_regression_test(gitrepo.working_diff()["diff"])
+    regression = verification.verify_regression_test(gitrepo.branch_diff(), TEST_PATH)
     if not tests.ok:
         _fail("tests", tests)
     _pass("tests", tests)

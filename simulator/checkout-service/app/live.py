@@ -26,6 +26,26 @@ from pathlib import Path
 CANONICAL_PATH = Path(__file__).with_name("checkout.py")
 """The versioned source. Read-only as far as the simulator is concerned."""
 
+
+def baseline_path() -> Path:
+    """The source production starts from when the world is reset.
+
+    Normally the versioned `checkout.py`, which carries the defect the demo is
+    about. Overridable via `SIMULATOR_BASELINE_SOURCE`, and that override is what
+    makes the test suite honest.
+
+    Without it the tests read `checkout.py` and require the defect to be present,
+    so the moment an agent correctly fixes the file, every test asserting that
+    production starts broken fails. The suite would be demanding that the bug is
+    never fixed - and since the workflow only proceeds on a green suite, a correct
+    fix could never be verified. Tests now seed a known faulty baseline of their
+    own and pass on both the broken and the fixed branch.
+    """
+    import os
+
+    override = os.environ.get("SIMULATOR_BASELINE_SOURCE", "").strip()
+    return Path(override) if override else CANONICAL_PATH
+
 _MODULE_NAME = "patchpilot_live_checkout"
 _STAGING_MODULE_NAME = "patchpilot_staging_checkout"
 _lock = threading.RLock()
@@ -59,7 +79,7 @@ def module():
             path = _live_path()
             if not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(CANONICAL_PATH.read_text())
+                path.write_text(baseline_path().read_text())
             _module = _load(path)
         return _module
 
@@ -116,12 +136,12 @@ def deploy_source(source: str):
 
 def reset():
     """Roll production back to whatever `checkout.py` currently holds."""
-    return deploy_source(CANONICAL_PATH.read_text())
+    return deploy_source(baseline_path().read_text())
 
 
 def live_source() -> str:
     """The source production is running right now."""
-    return _live_path().read_text() if _live_path().exists() else CANONICAL_PATH.read_text()
+    return _live_path().read_text() if _live_path().exists() else baseline_path().read_text()
 
 
 def verify_healthy() -> bool:

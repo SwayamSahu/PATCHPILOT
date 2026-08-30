@@ -24,7 +24,7 @@ sharper findings than one large pull request would.
 
 ## What Qodo found
 
-Two review rounds across five pull requests produced **22 findings**. The ones
+Three review rounds across six pull requests produced **48 findings**. The ones
 that changed the design are below; each fix carries a regression test named after
 the problem it prevents.
 
@@ -67,6 +67,55 @@ smoke test against the code that ends up running.
 | Makefile advertised scripts that did not exist | High | targets now match reality |
 | `GET /sessions/{id}/events` documented as full history | Medium | it paginates; replay now follows `next_page_token` to exhaustion |
 | Hand-rolled dotenv parser | Suggestion | adopted `python-dotenv` |
+
+### Round three: the repository server and the scripts
+
+Reviewing PR #9 produced six High-severity security findings, five of which
+defeated boundaries this project claims to enforce.
+
+**Running the test suite bypassed every boundary.** `run_git_tests` invokes
+pytest, which imports and runs whatever the agent wrote — code that never passes
+through `write_file` and so never meets the path jail. Worse, the subprocess
+inherited the full environment, handing that code `GITHUB_TOKEN`. Redaction of
+output is no defence: code can encode a secret, write it to a file, or send it
+over the network. The subprocess now receives only `PATH`, `HOME`, `TMPDIR`,
+locale and `PYTHONPATH`, and a test asserts that a hostile test reading the token
+gets `None`.
+
+**A test target could be an option rather than a path.** `--basetemp=/somewhere`
+is acted on by pytest, which clears the directory it names. Leading dashes are
+rejected and the target is passed after `--`.
+
+**`git add -A` staged the whole tree**, so a workflow file dropped in by a test
+would be committed — smuggling it past the write rules on the way to a pull
+request. Commits stage explicitly and refuse when an off-limits path has changed.
+The status listing needed `-uall`, because git otherwise collapses a new
+directory to `.github/` and a prefix check sails straight past the file it was
+meant to catch.
+
+**`push` took its argument as a refspec**, so `HEAD:main` would push the working
+tree onto the base branch and skip the pull request entirely. Only a plain branch
+name is accepted now.
+
+**The clone path was deleted unconditionally**, so a misconfigured
+`WORK_REPO_PATH` pointing at a home directory would destroy unrelated data. It is
+refused unless it looks like a dedicated clone, verified by name and by `.git`.
+
+**The askpass helper was reused if present**, then executed with `GITHUB_TOKEN` in
+its environment — a credential handover rather than a convenience. It is always
+rewritten.
+
+Alongside these: pull request retrieval now paginates (a single page silently
+dropped review feedback, and the Developer agent would believe it had absorbed
+every finding); a deleted reviewer no longer crashes retrieval; and recreating a
+branch resets it to its base so a retry cannot inherit a previous attempt while
+reporting a clean start.
+
+Reviewing PR #10 caught the finding that mattered most across the whole project:
+**`@read-only` was granting zero tools**, because TrueForge resolves those
+selectors from MCP annotations and ours had none. The permission model documented
+in ARCHITECTURE.md was inert while every test passed. All 23 tools are now
+annotated, with classification asserted in both directions.
 
 ### Considered and not adopted
 
