@@ -7,14 +7,25 @@ and recovery after a deployment is genuine rather than cosmetic.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+FAULTY_BASELINE = Path(__file__).parent / "fixtures" / "checkout_faulty.py"
+
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    """A checkout-api instance with isolated on-disk state."""
+    """A checkout-api instance with isolated on-disk state.
+
+    Production is seeded from a faulty baseline the tests own, rather than from
+    the versioned checkout.py. These tests assert that production starts broken;
+    reading the live file would make them fail the moment someone fixes the bug -
+    which is precisely what the agent is meant to do, and what the workflow needs
+    a green suite to confirm.
+    """
+    monkeypatch.setenv("SIMULATOR_BASELINE_SOURCE", str(FAULTY_BASELINE))
     monkeypatch.setenv("SIMULATOR_STATE_PATH", str(tmp_path / "state.json"))
     monkeypatch.setenv("SIMULATOR_RECOVERY_SECONDS", "24")
     # Import after the env is set so the state path is picked up at module load.
@@ -119,11 +130,9 @@ FIXED_SOURCE_MARKER = "cart.subtotal * (1 - cart.discount)"
 
 
 def _fixed_source(client) -> str:
-    """The versioned source with the discount defect corrected."""
-    from app import live
-
-    source = live.CANONICAL_PATH.read_text()
-    assert "cart.subtotal / cart.discount" in source, "expected the faulty source in git"
+    """The faulty baseline with the discount defect corrected."""
+    source = FAULTY_BASELINE.read_text()
+    assert "cart.subtotal / cart.discount" in source, "the baseline fixture must be faulty"
     return source.replace("cart.subtotal / cart.discount", FIXED_SOURCE_MARKER)
 
 
@@ -174,9 +183,9 @@ def test_deploying_never_mutates_the_versioned_source(client):
     """Production runs a working copy; the file under git must stay untouched."""
     from app import live
 
-    before = live.CANONICAL_PATH.read_text()
+    before = live.baseline_path().read_text()
     _deploy_fix(client)
-    assert live.CANONICAL_PATH.read_text() == before
+    assert live.baseline_path().read_text() == before
     assert FIXED_SOURCE_MARKER in client.get("/_control/live-source").json()["source"]
 
 
@@ -213,7 +222,7 @@ def test_a_deployment_cannot_declare_itself_healthy(client):
     """Health is verified against the running code, never taken on trust."""
     from app import live
 
-    unchanged = live.CANONICAL_PATH.read_text()  # still faulty
+    unchanged = live.baseline_path().read_text()  # still faulty
     response = client.post(
         "/_control/deploy",
         json={
