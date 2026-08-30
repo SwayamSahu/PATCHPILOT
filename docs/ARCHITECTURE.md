@@ -136,6 +136,17 @@ model call slowed to a crawl under swap pressure. `OLLAMA_CONTEXT_LENGTH=16384`
 keeps it at 7.7GB, which fits the largest turn comfortably now that tool results
 are summarised rather than returned raw.
 
+## 4b. Containers
+
+`docker-compose.yml` covers PatchPilot's own services: the simulator, the three
+MCP servers, the API and the UI. The harness and Ollama are deliberately left on
+the host and reached through `host.docker.internal` — TrueForge brings its own
+Compose stack with Postgres and Redis, and a containerised Ollama on Apple
+Silicon loses the GPU and with it any hope of a watchable demo. Containerising
+the parts that benefit, and being explicit about the parts that do not, is more
+useful than a compose file that technically starts everything and runs nothing
+well.
+
 ## 5. The five agents
 
 | Agent | Job | Tools it can see | Can it write? |

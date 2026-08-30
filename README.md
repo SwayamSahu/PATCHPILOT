@@ -263,6 +263,18 @@ make api         # orchestrator API on :8080
 make stop
 ```
 
+### With Docker
+
+`docker compose up --build` runs PatchPilot's own services — the simulator, the
+three MCP servers, the API and the UI.
+
+The harness and Ollama stay on the host by design, reached through
+`host.docker.internal`. TrueForge ships its own Compose stack with Postgres and
+Redis, and nesting that here would add two databases this demo does not need;
+Ollama wants the GPU, and on Apple Silicon a containerised Ollama falls back to
+CPU and becomes unusably slow. `make demo` is the simpler path and the one to
+reach for first.
+
 ## Running the demo
 
 ```bash

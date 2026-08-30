@@ -1,0 +1,12 @@
+.git
+.venv
+.workrepo
+.run
+.trueforge
+node_modules
+apps/web/node_modules
+apps/web/.next
+**/__pycache__
+*.egg-info
+.env
+simulator/.state

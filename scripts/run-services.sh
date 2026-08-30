@@ -25,19 +25,29 @@ start() {
 }
 
 # A connection that completes is not a healthy service: a 404 or 500 from a
-# failed or unrelated process would otherwise be reported as ready. Accept only
-# the status codes that mean the endpoint is actually serving. MCP endpoints
-# answer 405/406 to a bare GET, which is a live server refusing the wrong verb.
+# failed or unrelated process would otherwise be reported as ready.
+#
+# The two service kinds need different proof. An HTTP service must answer 200. An
+# MCP endpoint answers a bare GET with 400 and a JSON-RPC error ("Missing session
+# ID"), which is a live server correctly refusing an incomplete request - so the
+# check looks for the protocol in the body rather than trusting the status alone.
+# A stray 400 from an unrelated process will not be JSON-RPC.
 wait_for() {
-  local name="$1" url="$2" code
+  local name="$1" url="$2" kind="${3:-http}" code body
   for _ in $(seq 1 40); do
-    code="$(curl -s -o /dev/null -m 1 -w '%{http_code}' "$url" || echo 000)"
-    case "$code" in
-      200|405|406) echo "  ✓ $name is up (HTTP $code)"; return 0 ;;
-    esac
+    body="$(curl -s -m 1 -o /tmp/.pp-probe -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+    code="$body"
+    if [ "$kind" = "mcp" ]; then
+      if grep -q '"jsonrpc"' /tmp/.pp-probe 2>/dev/null; then
+        echo "  ✓ $name is up (MCP responding)"; rm -f /tmp/.pp-probe; return 0
+      fi
+    elif [ "$code" = "200" ]; then
+      echo "  ✓ $name is up"; rm -f /tmp/.pp-probe; return 0
+    fi
     sleep 0.25
   done
   echo "  ✗ $name did not come up (last HTTP $code); see .run/$name.log" >&2
+  rm -f /tmp/.pp-probe
   return 1
 }
 
@@ -50,7 +60,7 @@ start mcp-deployment "$PY" -m mcp_servers.deployment.server
 
 echo "==> waiting for health"
 wait_for simulator      "http://127.0.0.1:${SIMULATOR_PORT:-8000}/health"
-wait_for mcp-telemetry  "http://127.0.0.1:${MCP_TELEMETRY_PORT:-8101}/mcp"
-wait_for mcp-repository "http://127.0.0.1:${MCP_REPOSITORY_PORT:-8102}/mcp"
-wait_for mcp-deployment "http://127.0.0.1:${MCP_DEPLOYMENT_PORT:-8103}/mcp"
+wait_for mcp-telemetry  "http://127.0.0.1:${MCP_TELEMETRY_PORT:-8101}/mcp" mcp
+wait_for mcp-repository "http://127.0.0.1:${MCP_REPOSITORY_PORT:-8102}/mcp" mcp
+wait_for mcp-deployment "http://127.0.0.1:${MCP_DEPLOYMENT_PORT:-8103}/mcp" mcp
 echo "==> all services running"
