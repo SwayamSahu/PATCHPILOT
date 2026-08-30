@@ -344,3 +344,59 @@ def test_a_deleted_reviewer_does_not_crash_pull_request_retrieval():
     assert github_api._login(None) == "ghost"
     assert github_api._login({"login": None}) == "ghost"
     assert github_api._login({"login": "octocat"}) == "octocat"
+
+
+# --------------------------------------------------------------------------
+# A write must never leave a Python file unparseable
+# --------------------------------------------------------------------------
+
+
+def test_appending_broken_python_is_refused(repo):
+    """The exact failure seen on a full pipeline run.
+
+    An agent appended a test whose signature was missing `def`. The file stopped
+    parsing, the whole suite failed to collect, and because appending can only add
+    text the agent could not undo it — it re-appended a corrected copy six times
+    while the broken line stayed put.
+    """
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("def test_one():\n    assert True\n")
+    before = (repo / "tests" / "test_x.py").read_text()
+
+    result = repo_server.append_to_file(
+        path="tests/test_x.py",
+        content="test_two(client):\n    assert True\n",  # 'def' missing
+    )
+
+    assert result["error"] == "repository_error"
+    assert "unparseable" in result["detail"]
+    assert (repo / "tests" / "test_x.py").read_text() == before, "the file must be untouched"
+
+
+def test_appending_valid_python_still_works(repo):
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("def test_one():\n    assert True\n")
+    result = repo_server.append_to_file(
+        path="tests/test_x.py", content="def test_two():\n    assert True\n"
+    )
+    assert result["created"] is False
+    import ast
+
+    ast.parse((repo / "tests" / "test_x.py").read_text())
+
+
+def test_an_edit_that_breaks_the_file_is_refused(repo):
+    before = (repo / "app" / "checkout.py").read_text()
+    result = repo_server.edit_file(
+        path="app/checkout.py",
+        old_string="def compute_total(subtotal, discount):",
+        new_string="def compute_total(subtotal, discount:",  # unbalanced
+    )
+    assert result["error"] == "repository_error"
+    assert (repo / "app" / "checkout.py").read_text() == before
+
+
+def test_non_python_files_are_not_syntax_checked(repo):
+    """The guardrail is about Python; it must not block a README or a YAML file."""
+    result = repo_server.append_to_file(path="NOTES.md", content="# not python {{{")
+    assert "error" not in result
