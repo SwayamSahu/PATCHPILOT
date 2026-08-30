@@ -131,12 +131,24 @@ def find_pending_approval(session_id: str) -> PendingApproval | None:
             if not calls:
                 continue
             call = calls[0]
+            # The pause event identifies the call but does not repeat its name, so
+            # the name is recovered from the model message that issued it. The UI
+            # needs to tell a person which action is waiting on them.
             return PendingApproval(
                 thread_id=event.get("thread_id", "main"),
                 tool_call_id=call.get("id") or call.get("tool_call_id", ""),
-                tool_name=call.get("name", ""),
+                tool_name=call.get("name") or _tool_name_for(session_id, call.get("id", "")),
             )
     return None
+
+
+def _tool_name_for(session_id: str, tool_call_id: str) -> str:
+    """Find which tool a pending call refers to, by id, in the message stream."""
+    for event in reversed(session_events(session_id)):
+        for call in event.get("tool_calls") or []:
+            if call.get("id") == tool_call_id:
+                return (call.get("function") or call).get("name", "")
+    return ""
 
 
 def wait_for_turn(session_id: str, turn_id: str, timeout_s: int = 1800, poll_s: float = 3.0) -> str:

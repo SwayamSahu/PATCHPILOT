@@ -27,6 +27,12 @@ from mcp_servers.deployment.approvals import (  # noqa: E402
     ArtifactMismatch,
     HumanApprovalRequired,
 )
+from mcp_servers.repository import gitrepo  # noqa: E402
+from mcp_servers.repository.gitrepo import RepositoryError  # noqa: E402
+
+DEPLOY_PATH = "simulator/checkout-service/app/checkout.py"
+"""The file a production deployment ships. Deployments are scoped to the service
+under investigation rather than to arbitrary paths."""
 
 server = MCPServer(
     name="patchpilot-deployment",
@@ -80,22 +86,34 @@ def get_staging_health() -> dict:
     "deployment_id is what a human approves."
 )
 def prepare_production_deployment(
-    source: Annotated[str, Field(description="Exact checkout.py contents to be deployed.")],
     summary: Annotated[str, Field(description="One-line description of the change.")],
+    commit_sha: Annotated[str, Field(description="Commit SHA carrying the fix.")],
     pr_number: Annotated[int, Field(description="Pull request number carrying the fix.")] = 0,
-    commit_sha: Annotated[str, Field(description="Commit SHA to deploy.")] = "",
 ) -> dict:
     """Register an intent to deploy, recording exactly what is being proposed.
 
-    The source is content-addressed here. That digest is what the human's approval
-    is bound to, so the change that ships is provably the change that was reviewed.
+    The artifact is the service's own source file, read from the repository at
+    `commit_sha` and content-addressed here. It is never passed in as an argument
+    and never enters model context, so there is nothing for a caller to substitute
+    later: the digest is taken from an immutable commit, and deployment re-reads
+    that same commit.
     """
     deployment_id = f"deploy-{pr_number or 'x'}-{commit_sha[:7] or 'head'}"
-    record = approvals.prepare(deployment_id, source, summary, pr_number, commit_sha)
+    # The deploy path is fixed rather than a parameter. Exposing it invited the
+    # caller to guess a path (and get it wrong), and would have let a deployment
+    # be aimed at an arbitrary file. Deployments ship the service under
+    # investigation, nothing else.
+    path = DEPLOY_PATH
+    try:
+        source = gitrepo.read_file_at(commit_sha, path)
+    except RepositoryError as exc:
+        return {"error": "artifact_unavailable", "detail": str(exc)}
+    record = approvals.prepare(deployment_id, source, summary, pr_number, commit_sha, path)
     health = _guard(lambda: simulator.get("/health"))
     return {
         "deployment_id": deployment_id,
         "source_sha256": record["source_sha256"],
+        "path": path,
         "summary": summary,
         "pr_number": pr_number,
         "commit_sha": commit_sha,
@@ -121,7 +139,6 @@ def deploy_production(
     deployment_id: Annotated[
         str, Field(description="The deployment_id returned by prepare_production_deployment.")
     ],
-    source: Annotated[str, Field(description="Full contents of checkout.py, exactly as prepared.")],
 ) -> dict:
     """Deploy to production, if and only if a human approved *this exact change*.
 
@@ -137,6 +154,20 @@ def deploy_production(
     and commit come from the prepared record rather than from the caller, so
     neither can be restated at deploy time.
     """
+    prepared = approvals.get_prepared(deployment_id)
+    if prepared is None:
+        return {
+            "error": "human_approval_required",
+            "deployment_id": deployment_id,
+            "detail": f"deployment {deployment_id!r} was never prepared, so nothing was "
+            "reviewed and there is nothing to approve.",
+            "production_changed": False,
+        }
+    try:
+        source = gitrepo.read_file_at(prepared["commit_sha"], prepared.get("path", DEPLOY_PATH))
+    except RepositoryError as exc:
+        return {"error": "artifact_unavailable", "detail": str(exc), "production_changed": False}
+
     try:
         prepared = approvals.verify_artifact(deployment_id, source)
     except ArtifactMismatch as exc:

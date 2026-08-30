@@ -77,9 +77,13 @@ def run(agent: str, prompt: str, timeout_s: int = 900) -> int:
     state = "running"
     while time.time() < deadline:
         time.sleep(5)
-        current = unwrap(
-            httpx.get(f"{API}/sessions/{session_id}/turns/{turn_id}", timeout=30).json()
-        )
+        try:
+            current = unwrap(
+                httpx.get(f"{API}/sessions/{session_id}/turns/{turn_id}", timeout=60).json()
+            )
+        except httpx.HTTPError:
+            # The harness is busy driving the model; a slow poll is not a failure.
+            continue
         state = (current.get("state") or {}).get("status", "running")
         if state != "running":
             break

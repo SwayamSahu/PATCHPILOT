@@ -247,6 +247,23 @@ def diff(sha: str) -> dict:
     return {"sha": sha, "diff": git_or_raise("show", "--format=", sha)}
 
 
+def read_file_at(commit_sha: str, relative: str) -> str:
+    """Read a file's contents as of a specific commit.
+
+    Used to fetch the exact artifact a deployment was prepared from. Reading from
+    an immutable commit rather than the working tree means the thing deployed is
+    the thing reviewed, even if the checkout has moved on since.
+    """
+    require_ready()
+    resolve_path(relative)
+    result = run_git("show", f"{commit_sha}:{relative}")
+    if not result.ok:
+        raise RepositoryError(
+            f"could not read {relative!r} at commit {commit_sha!r}: {result.stderr.strip()}"
+        )
+    return result.stdout
+
+
 def working_diff() -> dict:
     """The uncommitted change set — what the agent has actually written."""
     require_ready()
