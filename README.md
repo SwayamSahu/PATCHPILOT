@@ -338,7 +338,11 @@ rather than surfacing as a vague dead end.
   *working* regression test is not consistently successful. The pipeline fails
   honestly when that happens rather than proceeding. A larger model improves this;
   none of the safety properties depend on model quality.
-- **It is slow.** A local 8B model with a 32k context takes minutes per stage.
+- **It is slow, but not as slow as it first appears.** Each stage takes a few
+  minutes on a local 8B model. If it takes far longer than that, the machine is
+  almost certainly short of memory — check `OLLAMA_CONTEXT_LENGTH` is 16384 rather
+  than 32768, which is the difference between a 7.7GB and a 9.8GB resident model
+  and, on 16GB, between minutes and tens of minutes per stage.
 - **One incident.** The workflow is built around the checkout defect, not as a
   general incident platform.
 - No authentication; safe to run locally, not hardened for shared use.

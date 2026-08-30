@@ -121,6 +121,20 @@ The workflow fails loudly rather than pretending. If a stage cannot be verified,
 the timeline says which and why, and production is left alone. That is the system
 behaving correctly, and it is worth saying so rather than restarting.
 
-The local model is the slowest part. If a stage is taking a while, `docs/README`
-notes the timings to expect; the harness log is at `.trueforge/server.log` and the
-API log at `.run/api.log`.
+The local model is the slowest part. Expect a few minutes per stage; the
+investigation typically completes in about four.
+
+If a stage is taking far longer, the machine is short of memory rather than the
+model being slow. Check:
+
+```bash
+ollama ps          # CONTEXT should read 16384, SIZE about 7.7 GB
+memory_pressure    # free percentage below ~15% means swapping
+```
+
+At 32k context the model resides at 9.8GB, and alongside the harness, the web dev
+server and the Python services on a 16GB machine that turns minutes into tens of
+minutes. Closing the web dev server during a headless run frees more still.
+
+Logs: the harness at `.trueforge/server.log`, the API at `.run/api.log`, each
+service at `.run/<name>.log`.
