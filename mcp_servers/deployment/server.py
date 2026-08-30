@@ -1,0 +1,256 @@
+"""Deployment MCP server — staging is free, production is not.
+
+The tools here are deliberately asymmetric. Anything reversible (staging deploys,
+health checks, preparing a plan) the agent may do on its own. The one irreversible
+action, `deploy_production`, cannot be performed by the agent under any
+circumstances without a human having approved that exact deployment first.
+
+See `approvals.py` for why the token is looked up rather than passed in.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from typing import Annotated
+
+from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
+from pydantic import Field
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from mcp_servers.common import simulator  # noqa: E402
+from mcp_servers.common.simulator import SimulatorError, SimulatorUnavailable  # noqa: E402
+from mcp_servers.deployment import approvals  # noqa: E402
+from mcp_servers.deployment.approvals import (  # noqa: E402
+    ArtifactMismatch,
+    HumanApprovalRequired,
+)
+from mcp_servers.repository import gitrepo  # noqa: E402
+from mcp_servers.repository.gitrepo import RepositoryError  # noqa: E402
+
+DEPLOY_PATH = "simulator/checkout-service/app/checkout.py"
+"""The file a production deployment ships. Deployments are scoped to the service
+under investigation rather than to arbitrary paths."""
+
+server = MCPServer(
+    name="patchpilot-deployment",
+    instructions=(
+        "Deployment tools for the checkout-api service. Staging deployments and "
+        "health checks are always available. Production deployment is gated: it "
+        "requires a human to approve the specific deployment first, and there is "
+        "no parameter or argument that bypasses that. If deploy_production reports "
+        "that approval is required, stop and report that a human decision is "
+        "needed - do not retry, and do not attempt to construct an approval."
+    ),
+)
+
+
+def _guard(call):
+    try:
+        return call()
+    except SimulatorUnavailable as exc:
+        return {"error": "production_environment_unreachable", "detail": str(exc)}
+    except SimulatorError as exc:
+        return {"error": "upstream_error", "status_code": exc.status_code, "detail": exc.detail}
+
+
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+    description="Deploy a candidate fix to staging. Reversible and always "
+    "permitted. Provide the full new contents of checkout.py."
+)
+def deploy_staging(
+    source: Annotated[str, Field(description="Full new contents of checkout.py.")],
+    summary: Annotated[str, Field(description="One-line description of the change.")],
+) -> dict:
+    return _guard(
+        lambda: simulator.post(
+            "/_control/staging/deploy", {"source": source, "summary": summary}
+        )
+    )
+
+
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    description="Health of the staging environment after a staging deploy.")
+def get_staging_health() -> dict:
+    return _guard(lambda: simulator.get("/_control/staging/health"))
+
+
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    description="Prepare a production deployment and return the plan, its risk "
+    "assessment, and a deployment_id. This does NOT deploy anything. The "
+    "deployment_id is what a human approves."
+)
+def prepare_production_deployment(
+    summary: Annotated[str, Field(description="One-line description of the change.")],
+    commit_sha: Annotated[str, Field(description="Commit SHA carrying the fix.")],
+    pr_number: Annotated[int, Field(description="Pull request number carrying the fix.")] = 0,
+) -> dict:
+    """Register an intent to deploy, recording exactly what is being proposed.
+
+    The artifact is the service's own source file, read from the repository at
+    `commit_sha` and content-addressed here. It is never passed in as an argument
+    and never enters model context, so there is nothing for a caller to substitute
+    later: the digest is taken from an immutable commit, and deployment re-reads
+    that same commit.
+    """
+    deployment_id = f"deploy-{pr_number or 'x'}-{commit_sha[:7] or 'head'}"
+    # The deploy path is fixed rather than a parameter. Exposing it invited the
+    # caller to guess a path (and get it wrong), and would have let a deployment
+    # be aimed at an arbitrary file. Deployments ship the service under
+    # investigation, nothing else.
+    path = DEPLOY_PATH
+    try:
+        source = gitrepo.read_file_at(commit_sha, path)
+    except RepositoryError as exc:
+        return {"error": "artifact_unavailable", "detail": str(exc)}
+    record = approvals.prepare(deployment_id, source, summary, pr_number, commit_sha, path)
+    health = _guard(lambda: simulator.get("/health"))
+    return {
+        "deployment_id": deployment_id,
+        "source_sha256": record["source_sha256"],
+        "path": path,
+        "summary": summary,
+        "pr_number": pr_number,
+        "commit_sha": commit_sha,
+        "target": "production",
+        "reversible": False,
+        "risk": "MEDIUM",
+        "current_production_health": health,
+        "approval_status": "pending_human_approval",
+        "note": (
+            "This deployment is not authorised yet. A human must approve "
+            f"{deployment_id} in the PatchPilot UI before deploy_production will run."
+        ),
+    }
+
+
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True),
+    description="Deploy to PRODUCTION. Irreversible. Requires that a human has "
+    "already approved this specific deployment_id; there is no way to authorise "
+    "it from here. Fails safe if approval is absent, expired, or already used."
+)
+def deploy_production(
+    deployment_id: Annotated[
+        str, Field(description="The deployment_id returned by prepare_production_deployment.")
+    ],
+) -> dict:
+    """Deploy to production, if and only if a human approved *this exact change*.
+
+    Two things are checked, in this order:
+
+    1. the source matches the digest recorded when the deployment was prepared, so
+       an approval cannot be redirected at different code; and
+    2. a human approval exists and is unspent.
+
+    The digest is checked first so a mismatched attempt cannot burn a valid
+    approval. The approval token itself is looked up, never accepted as an
+    argument: a model that invented one would have nowhere to put it. The summary
+    and commit come from the prepared record rather than from the caller, so
+    neither can be restated at deploy time.
+    """
+    prepared = approvals.get_prepared(deployment_id)
+    if prepared is None:
+        return {
+            "error": "human_approval_required",
+            "deployment_id": deployment_id,
+            "detail": f"deployment {deployment_id!r} was never prepared, so nothing was "
+            "reviewed and there is nothing to approve.",
+            "production_changed": False,
+        }
+    try:
+        source = gitrepo.read_file_at(prepared["commit_sha"], prepared.get("path", DEPLOY_PATH))
+    except RepositoryError as exc:
+        return {"error": "artifact_unavailable", "detail": str(exc), "production_changed": False}
+
+    try:
+        prepared = approvals.verify_artifact(deployment_id, source)
+    except ArtifactMismatch as exc:
+        return {
+            "error": "artifact_mismatch",
+            "deployment_id": deployment_id,
+            "detail": str(exc),
+            "production_changed": False,
+        }
+    except HumanApprovalRequired as exc:
+        return {
+            "error": "human_approval_required",
+            "deployment_id": deployment_id,
+            "detail": str(exc),
+            "production_changed": False,
+        }
+
+    try:
+        approval = approvals.consume(deployment_id)
+    except HumanApprovalRequired as exc:
+        return {
+            "error": "human_approval_required",
+            "deployment_id": deployment_id,
+            "detail": str(exc),
+            "production_changed": False,
+        }
+
+    summary = prepared["summary"]
+    commit_sha = prepared["commit_sha"]
+
+    result = _guard(
+        lambda: simulator.post(
+            "/_control/deploy",
+            {
+                # Derived from the commit actually being shipped. A hard-coded id
+                # made every deployment claim to be the same revision, so the
+                # ledger could not distinguish one production change from another.
+                "revision_id": f"pr{prepared['pr_number']}-{commit_sha[:7]}"
+                if commit_sha
+                else deployment_id,
+                "summary": summary,
+                "source": source,
+                "commit_sha": commit_sha,
+                "deployed_by": "patchpilot",
+            },
+        )
+    )
+    if "error" in result:
+        # The deployment failed after the approval was spent. Say so plainly: a
+        # silent retry here would be a second unapproved production attempt.
+        return {
+            **result,
+            "deployment_id": deployment_id,
+            "production_changed": False,
+            "detail": "Deployment failed. Production is unchanged and the approval "
+            "has been spent; a new human approval is required to try again.",
+        }
+    return {
+        "status": "deployed",
+        "deployment_id": deployment_id,
+        "approved_by": approval.approved_by,
+        "approved_at": approval.approved_at,
+        "production_changed": True,
+        "deployment": result.get("deployment"),
+        "health": result.get("health"),
+    }
+
+
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    description="Current production health. Call repeatedly after a deployment to "
+    "confirm the incident has actually recovered."
+)
+def get_production_health() -> dict:
+    return _guard(lambda: simulator.get("/health"))
+
+
+def main() -> None:
+    import uvicorn
+
+    port = int(os.environ.get("MCP_DEPLOYMENT_PORT", "8103"))
+    uvicorn.run(server.streamable_http_app(), host="127.0.0.1", port=port)
+
+
+if __name__ == "__main__":
+    main()

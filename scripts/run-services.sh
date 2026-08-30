@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Start the simulated production service and the three MCP servers.
+#
+# Each writes to .run/<name>.log and its pid to .run/<name>.pid, so
+# scripts/stop.sh can shut the whole set down cleanly.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# shellcheck disable=SC1091
+[ -f .env ] && set -a && . ./.env && set +a
+
+mkdir -p .run
+PY=".venv/bin/python"
+[ -x "$PY" ] || { echo "error: .venv not found. Run 'make setup' first." >&2; exit 1; }
+
+start() {
+  local name="$1"; shift
+  if [ -f ".run/$name.pid" ] && kill -0 "$(cat ".run/$name.pid")" 2>/dev/null; then
+    echo "  = $name already running (pid $(cat ".run/$name.pid"))"
+    return
+  fi
+  "$@" > ".run/$name.log" 2>&1 &
+  echo $! > ".run/$name.pid"
+  echo "  + $name (pid $!)"
+}
+
+# A connection that completes is not a healthy service: a 404 or 500 from a
+# failed or unrelated process would otherwise be reported as ready. Accept only
+# the status codes that mean the endpoint is actually serving. MCP endpoints
+# answer 405/406 to a bare GET, which is a live server refusing the wrong verb.
+wait_for() {
+  local name="$1" url="$2" code
+  for _ in $(seq 1 40); do
+    code="$(curl -s -o /dev/null -m 1 -w '%{http_code}' "$url" || echo 000)"
+    case "$code" in
+      200|405|406) echo "  ✓ $name is up (HTTP $code)"; return 0 ;;
+    esac
+    sleep 0.25
+  done
+  echo "  ✗ $name did not come up (last HTTP $code); see .run/$name.log" >&2
+  return 1
+}
+
+echo "==> starting services"
+start simulator "$PY" -m uvicorn app.main:app \
+  --app-dir simulator/checkout-service --host 127.0.0.1 --port "${SIMULATOR_PORT:-8000}"
+start mcp-telemetry  "$PY" -m mcp_servers.telemetry.server
+start mcp-repository "$PY" -m mcp_servers.repository.server
+start mcp-deployment "$PY" -m mcp_servers.deployment.server
+
+echo "==> waiting for health"
+wait_for simulator      "http://127.0.0.1:${SIMULATOR_PORT:-8000}/health"
+wait_for mcp-telemetry  "http://127.0.0.1:${MCP_TELEMETRY_PORT:-8101}/mcp"
+wait_for mcp-repository "http://127.0.0.1:${MCP_REPOSITORY_PORT:-8102}/mcp"
+wait_for mcp-deployment "http://127.0.0.1:${MCP_DEPLOYMENT_PORT:-8103}/mcp"
+echo "==> all services running"
