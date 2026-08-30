@@ -46,6 +46,20 @@ def load(path: Path) -> dict:
     return json.loads(raw)
 
 
+def unreachable(exc: Exception) -> SystemExit:
+    """Fail with a diagnostic rather than a stack trace.
+
+    A harness that is not running is an ordinary situation, not an exceptional
+    one, and forty lines of httpx traceback tells the reader nothing they can act
+    on.
+    """
+    return SystemExit(
+        f"error: cannot reach the TrueForge harness at {API}\n"
+        f"       {exc}\n"
+        "       start it with 'make harness' (or npx @truefoundry/trueforge@latest)"
+    )
+
+
 def find_agent_id(name: str):
     """Resolve a name to an agent id.
 
@@ -53,7 +67,10 @@ def find_agent_id(name: str):
     the id up first. Posting blind returns 409 on the second run and would make
     this script single-use.
     """
-    response = httpx.get(f"{API}/agents", timeout=30)
+    try:
+        response = httpx.get(f"{API}/agents", timeout=30)
+    except httpx.HTTPError as exc:
+        raise unreachable(exc) from None
     if response.status_code >= 400:
         return None
     for agent in response.json().get("data", []):
@@ -66,14 +83,17 @@ def apply(definition: dict) -> bool:
     name = definition["name"]
     body = {"name": name, "manifest": definition["manifest"]}
     agent_id = find_agent_id(name)
-    if agent_id:
-        response = httpx.put(
-            f"{API}/agents/{agent_id}", json={"manifest": body["manifest"]}, timeout=30
-        )
-        verb = "updated"
-    else:
-        response = httpx.post(f"{API}/agents", json=body, timeout=30)
-        verb = "created"
+    try:
+        if agent_id:
+            response = httpx.put(
+                f"{API}/agents/{agent_id}", json={"manifest": body["manifest"]}, timeout=30
+            )
+            verb = "updated"
+        else:
+            response = httpx.post(f"{API}/agents", json=body, timeout=30)
+            verb = "created"
+    except httpx.HTTPError as exc:
+        raise unreachable(exc) from None
     if response.status_code < 400:
         servers = definition["manifest"].get("mcp_servers", [])
         scope = ", ".join(
