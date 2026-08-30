@@ -64,7 +64,13 @@ class WorkflowState(StrEnum):
     DEPLOYING = "DEPLOYING"
     VERIFYING = "VERIFYING"
     RESOLVED = "RESOLVED"
+    REJECTED = "REJECTED"
     FAILED = "FAILED"
+
+    # REJECTED is an addition to the states named in the brief. A human declining
+    # a deployment is a correct outcome of the system working, not a failure of
+    # it, and collapsing the two would misreport the one decision the product
+    # exists to preserve.
 
 
 class Status(StrEnum):
