@@ -15,6 +15,26 @@ REPO="${GITHUB_REPO:?GITHUB_REPO must be set in .env}"
 BRANCH="${PATCHPILOT_BASE_BRANCH:-${GITHUB_DEFAULT_BRANCH:-main}}"
 TARGET="${WORK_REPO_PATH:-$PWD/.workrepo}"
 
+# This script deletes TARGET. A misconfigured WORK_REPO_PATH pointing at a home
+# directory or the project root would therefore destroy unrelated work, so the
+# path must look like a dedicated clone before anything is removed: either it
+# does not exist yet, or it is a git repository we previously created.
+if [ -e "$TARGET" ]; then
+  case "$(basename "$TARGET")" in
+    .workrepo|workrepo|*-workrepo) ;;
+    *)
+      echo "error: refusing to delete '$TARGET'." >&2
+      echo "       WORK_REPO_PATH must be a dedicated clone directory named" >&2
+      echo "       .workrepo, workrepo, or *-workrepo." >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -d "$TARGET/.git" ]; then
+    echo "error: refusing to delete '$TARGET': it is not a git clone." >&2
+    exit 1
+  fi
+fi
+
 echo "==> preparing working clone at $TARGET (branch $BRANCH)"
 rm -rf "$TARGET"
 

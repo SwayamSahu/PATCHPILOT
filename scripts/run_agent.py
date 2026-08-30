@@ -35,6 +35,18 @@ def unwrap(payload: dict) -> dict:
     return payload.get("data", payload)
 
 
+def checked(response: httpx.Response, what: str) -> dict:
+    """Return the JSON body, or fail with a diagnostic rather than a traceback.
+
+    Indexing the body without checking the status turns an ordinary mistake - an
+    unknown agent name, an invalid manifest - into a KeyError several frames from
+    the cause, which is a much worse thing to hand someone at a terminal.
+    """
+    if response.status_code >= 400:
+        raise SystemExit(f"error: {what} failed ({response.status_code}): {response.text[:300]}")
+    return unwrap(response.json())
+
+
 def session_events(session_id: str, limit: int = 200) -> list:
     """Fetch a session's events, oldest first, following pagination.
 
@@ -47,7 +59,9 @@ def session_events(session_id: str, limit: int = 200) -> list:
         params = {"limit": min(100, limit)}
         if cursor:
             params["page_token"] = cursor
-        payload = httpx.get(f"{API}/sessions/{session_id}/events", params=params, timeout=60).json()
+        response = httpx.get(f"{API}/sessions/{session_id}/events", params=params, timeout=60)
+        payload = checked(response, "listing session events")
+        payload = payload if isinstance(payload, dict) else {"data": payload}
         collected.extend(payload.get("data", []))
         cursor = (payload.get("pagination") or {}).get("next_page_token")
         if not cursor or len(collected) >= limit:
@@ -58,17 +72,18 @@ def session_events(session_id: str, limit: int = 200) -> list:
 
 def run(agent: str, prompt: str, timeout_s: int = 900) -> int:
     created = httpx.post(f"{API}/sessions", json={"agent": {"name": agent}}, timeout=60)
-    session = unwrap(created.json())
+    session = checked(created, f"creating a session for agent {agent!r}")
     session_id = session["id"]
     print(f"agent   : {agent}")
     print(f"session : {session_id}")
 
-    turn = unwrap(
+    turn = checked(
         httpx.post(
             f"{API}/sessions/{session_id}/turns",
             json={"input": [{"type": "user.message", "content": prompt}], "stream": False},
             timeout=120,
-        ).json()
+        ),
+        "starting a turn",
     )
     turn_id = turn["id"]
     print(f"turn    : {turn_id}\n")

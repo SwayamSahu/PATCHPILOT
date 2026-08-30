@@ -88,8 +88,41 @@ checkout.
 
 Generated code runs in the harness sandbox, never in the API process. The sandbox
 is isolated from the project, has an execution timeout, and captures stdout,
-stderr, and exit code. Test runs are time limited so a hanging test cannot stall
-the workflow indefinitely.
+stderr, and exit code.
+
+**Running the test suite is also code execution**, and it is worth being explicit
+about it. `run_git_tests` invokes pytest, which imports and runs whatever the
+agent wrote — including code that never passes through `write_file` and therefore
+never meets the path jail. Three things contain that:
+
+* **No credentials in the environment.** The subprocess receives only `PATH`,
+  `HOME`, `TMPDIR`, locale, and `PYTHONPATH`. Every credential-shaped variable is
+  withheld, because redacting output afterwards is not a defence — code can
+  encode a secret, write it to a file, or send it over the network. A test that
+  reads `GITHUB_TOKEN` gets `None`, and a test asserts exactly that.
+* **No option injection.** A target beginning with `-` is rejected and the target
+  is passed after `--`, so `--basetemp=/somewhere` cannot become an option that
+  pytest acts on — it clears the directory it names.
+* **A throwaway working directory.** Tests run in `.workrepo/`, a disposable
+  clone, never a developer's checkout.
+
+The residual risk is honest: a hostile test can still touch files the *host user*
+can write. What it cannot do is read a credential or reach the real repository.
+For a hackathon project run locally that is the right balance; a production
+deployment would run tests inside the sandbox too.
+
+## 4a. Getting a change into the repository
+
+Two routes were open and are now closed:
+
+* **`git add -A` staged everything.** A file dropped into the working tree by a
+  test — a CI workflow, say — would be committed, smuggling it past the write
+  rules on the way to a pull request. Commits now stage explicitly and refuse
+  outright if an off-limits path has changed.
+* **`push` took a refspec.** The branch argument went to git verbatim, so
+  `HEAD:main` would push the working tree straight onto the base branch and skip
+  the pull request entirely, and `--all` would push everything. Only a plain
+  branch name is accepted, expanded to an explicit refspec.
 
 ## 5. Fabricated results
 

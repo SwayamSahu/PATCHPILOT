@@ -24,13 +24,20 @@ start() {
   echo "  + $name (pid $!)"
 }
 
+# A connection that completes is not a healthy service: a 404 or 500 from a
+# failed or unrelated process would otherwise be reported as ready. Accept only
+# the status codes that mean the endpoint is actually serving. MCP endpoints
+# answer 405/406 to a bare GET, which is a live server refusing the wrong verb.
 wait_for() {
-  local name="$1" url="$2"
+  local name="$1" url="$2" code
   for _ in $(seq 1 40); do
-    if curl -s -o /dev/null -m 1 "$url"; then echo "  ✓ $name is up"; return 0; fi
+    code="$(curl -s -o /dev/null -m 1 -w '%{http_code}' "$url" || echo 000)"
+    case "$code" in
+      200|405|406) echo "  ✓ $name is up (HTTP $code)"; return 0 ;;
+    esac
     sleep 0.25
   done
-  echo "  ✗ $name did not come up; see .run/$name.log" >&2
+  echo "  ✗ $name did not come up (last HTTP $code); see .run/$name.log" >&2
   return 1
 }
 
