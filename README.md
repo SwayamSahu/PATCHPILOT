@@ -208,6 +208,11 @@ The interface is three panels and one control:
 Images are captured from a live run rather than mocked up; see
 [docs/DEMO.md](docs/DEMO.md) for the moments worth capturing.
 
+<img width="1511" height="718" alt="image" src="https://github.com/user-attachments/assets/885fb1f1-e8a8-4bc6-b198-91e53db9730d" />
+<img width="1511" height="903" alt="image" src="https://github.com/user-attachments/assets/e2c6c5cd-2c60-4d7b-a582-0d102032412f" />
+<img width="1511" height="811" alt="image" src="https://github.com/user-attachments/assets/47e685f0-777d-4e37-898f-be9918889bf7" />
+
+
 ## Installation
 
 Requires **Python 3.11+**, **Node 22.14+**, [uv](https://docs.astral.sh/uv/), and
