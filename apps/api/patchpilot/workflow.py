@@ -97,8 +97,9 @@ def _run_agent(agent: str, prompt: str, timeout_s: int = 1800) -> tuple[dict, li
 
     events = harness.session_events(session_id)
     tool_calls, final_text = [], ""
+    tool_names: dict = {}
     for event in events:
-        for patchpilot_event in _translate(event, agent):
+        for patchpilot_event in _translate(event, agent, tool_names):
             _emit(patchpilot_event)
         for call in event.get("tool_calls") or []:
             function = call.get("function", call)
@@ -115,12 +116,13 @@ def _run_agent(agent: str, prompt: str, timeout_s: int = 1800) -> tuple[dict, li
     return _extract_json(final_text), tool_calls
 
 
-def _translate(raw: dict, agent: str) -> list:
+def _translate(raw: dict, agent: str, tool_names: dict) -> list:
     from .events import from_harness_event
 
     # Only surface tool activity and pauses; agent lifecycle is emitted by hand so
     # the timeline reads as stages rather than as harness internals.
-    return [e for e in from_harness_event(raw, agent) if e.type != EventType.AGENT_STARTED]
+    translated = from_harness_event(raw, agent, tool_names)
+    return [e for e in translated if e.type != EventType.AGENT_STARTED]
 
 
 def _fail(stage: str, verdict: verification.Verdict) -> None:

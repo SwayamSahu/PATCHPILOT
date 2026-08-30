@@ -141,8 +141,15 @@ def describe_tool(name: str) -> str:
     return TOOL_SUMMARIES.get(name, f"Calling {name}")
 
 
-def from_harness_event(raw: dict, agent: str) -> list:
-    """Translate one TrueForge event into zero or more PatchPilot events."""
+def from_harness_event(raw: dict, agent: str, tool_names: dict | None = None) -> list:
+    """Translate one TrueForge event into zero or more PatchPilot events.
+
+    `tool_names` maps tool_call_id to the tool's name. The harness's
+    `tool.response` events identify the call by id but do not repeat its name, so
+    without this a result row renders as a bare "Calling" with nothing after it.
+    The caller builds the map as it walks the stream in order.
+    """
+    tool_names = tool_names if tool_names is not None else {}
     kind = raw.get("type")
     produced = []
 
@@ -158,6 +165,8 @@ def from_harness_event(raw: dict, agent: str) -> list:
         for call in raw.get("tool_calls") or []:
             function = call.get("function", call)
             name = function.get("name", "")
+            if call.get("id"):
+                tool_names[call["id"]] = name
             is_sandbox = name in SANDBOX_TOOLS
             produced.append(
                 Event(
@@ -171,12 +180,17 @@ def from_harness_event(raw: dict, agent: str) -> list:
             )
 
     elif kind == "tool.response":
-        name = raw.get("name") or raw.get("tool_name") or ""
+        call_id = raw.get("tool_call_id") or raw.get("id", "")
+        name = raw.get("name") or raw.get("tool_name") or tool_names.get(call_id, "")
+        if not name:
+            # An unidentifiable result adds a blank row and no information. The
+            # paired TOOL_CALL already recorded that the action happened.
+            return produced
         is_sandbox = name in SANDBOX_TOOLS
         produced.append(
             Event(
                 EventType.SANDBOX_RESULT if is_sandbox else EventType.TOOL_RESULT,
-                describe_tool(name),
+                f"{describe_tool(name)} — done",
                 agent=agent,
                 tool=name,
                 detail={"result": _truncate(raw.get("content") or raw.get("result"))},

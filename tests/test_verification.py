@@ -134,3 +134,31 @@ def test_readiness_passes_only_when_everything_holds():
         "pull_request": verification.Verdict(True, "#11 exists"),
     }
     assert verification.verify_deployment_readiness(verdicts).ok is True
+
+
+# --------------------------------------------------------------------------
+# Event translation
+# --------------------------------------------------------------------------
+
+
+def test_a_tool_result_is_labelled_with_the_tool_that_produced_it():
+    """The harness identifies a result by call id, not by name."""
+    from patchpilot.events import EventType, from_harness_event
+
+    names: dict = {}
+    call = {
+        "type": "model.message",
+        "tool_calls": [{"id": "c1", "function": {"name": "get_metrics"}}],
+    }
+    from_harness_event(call, "detective", names)
+    results = from_harness_event(
+        {"type": "tool.response", "tool_call_id": "c1"}, "detective", names
+    )
+    assert results[0].type is EventType.TOOL_RESULT
+    assert "Querying production metrics" in results[0].summary
+
+
+def test_an_unidentifiable_tool_result_is_dropped_rather_than_shown_blank():
+    from patchpilot.events import from_harness_event
+
+    assert from_harness_event({"type": "tool.response"}, "detective", {}) == []
