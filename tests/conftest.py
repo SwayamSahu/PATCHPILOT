@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -12,7 +13,18 @@ import httpx
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
+
+
+def _python() -> str:
+    """The interpreter to launch the simulator with.
+
+    Prefer the repository's own virtualenv, but fall back to the interpreter
+    running the tests. A fresh clone has no .venv, and hard-coding that path made
+    every subprocess-based test error out there - including when an agent checks
+    out the repo and runs the suite to verify its own fix.
+    """
+    candidate = REPO_ROOT / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.exists() else sys.executable
 
 
 def _free_port() -> int:
@@ -38,7 +50,7 @@ def live_simulator(tmp_path_factory):
         "PYTHONPATH": str(REPO_ROOT / "simulator" / "checkout-service"),
     }
     process = subprocess.Popen(
-        [str(PYTHON), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
+        [_python(), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
         cwd=str(REPO_ROOT / "simulator" / "checkout-service"),
         env=env,
         stdout=subprocess.DEVNULL,

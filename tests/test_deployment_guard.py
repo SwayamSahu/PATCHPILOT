@@ -19,11 +19,22 @@ from mcp_servers.deployment.approvals import HumanApprovalRequired
 
 @pytest.fixture(autouse=True)
 def _isolated_store(tmp_path, monkeypatch, live_simulator):
-    """Each test gets an empty approval store and a live production service."""
+    """Each test gets an empty approval store and a live production service.
+
+    The deployment tools read the artifact out of git at a specific commit, so the
+    artifact lookup is stubbed here with content the test controls. That keeps
+    these tests about the approval boundary rather than about git.
+    """
     monkeypatch.setattr(approvals, "STORE_PATH", tmp_path / "approvals.json")
     approvals.clear()
     httpx.post(f"{live_simulator}/_control/reset", timeout=5)
+    monkeypatch.setattr(
+        deployment_server.gitrepo, "read_file_at", lambda sha, path: _ARTIFACTS[sha]
+    )
     return live_simulator
+
+
+_ARTIFACTS: dict = {}
 
 
 def _fixed_source() -> str:
@@ -35,8 +46,8 @@ def _fixed_source() -> str:
 
 def _prepare(source=None, pr_number=27, commit_sha="abc1234def") -> str:
     """Prepare a deployment the way the agent would, returning its id."""
+    _ARTIFACTS[commit_sha] = source if source is not None else _fixed_source()
     plan = deployment_server.prepare_production_deployment(
-        source=source if source is not None else _fixed_source(),
         summary="restore multiplicative discount",
         pr_number=pr_number,
         commit_sha=commit_sha,
@@ -54,9 +65,7 @@ def test_production_deploy_without_approval_is_refused(live_simulator):
     before = httpx.get(f"{live_simulator}/health", timeout=5).json()
 
     _prepare()
-    result = deployment_server.deploy_production(
-        deployment_id="deploy-27-abc1234", source=_fixed_source()
-    )
+    result = deployment_server.deploy_production(deployment_id="deploy-27-abc1234")
 
     assert result["error"] == "human_approval_required"
     assert result["production_changed"] is False
@@ -73,9 +82,7 @@ def test_approval_for_one_deployment_does_not_authorise_another():
     _prepare()
     approvals.grant("deploy-27-abc1234", approved_by="engineer@example.com")
 
-    result = deployment_server.deploy_production(
-        deployment_id="deploy-99-deadbee", source=_fixed_source()
-    )
+    result = deployment_server.deploy_production(deployment_id="deploy-99-deadbee")
     assert result["error"] == "human_approval_required"
     assert result["production_changed"] is False
 
@@ -84,14 +91,10 @@ def test_approvals_are_single_use():
     """A replayed deploy call after a rollback must not silently redeploy."""
     _prepare()
     approvals.grant("deploy-27-abc1234", approved_by="engineer@example.com")
-    first = deployment_server.deploy_production(
-        deployment_id="deploy-27-abc1234", source=_fixed_source()
-    )
+    first = deployment_server.deploy_production(deployment_id="deploy-27-abc1234")
     assert first["production_changed"] is True
 
-    second = deployment_server.deploy_production(
-        deployment_id="deploy-27-abc1234", source=_fixed_source()
-    )
+    second = deployment_server.deploy_production(deployment_id="deploy-27-abc1234")
     assert second["error"] == "human_approval_required"
     assert "single use" in second["detail"]
 
@@ -99,9 +102,7 @@ def test_approvals_are_single_use():
 def test_expired_approvals_are_refused():
     _prepare()
     approvals.grant("deploy-27-abc1234", approved_by="engineer@example.com", ttl_seconds=-1)
-    result = deployment_server.deploy_production(
-        deployment_id="deploy-27-abc1234", source=_fixed_source()
-    )
+    result = deployment_server.deploy_production(deployment_id="deploy-27-abc1234")
     assert result["error"] == "human_approval_required"
     assert "expired" in result["detail"]
 
@@ -110,9 +111,7 @@ def test_rejection_revokes_the_approval():
     _prepare()
     approvals.grant("deploy-27-abc1234", approved_by="engineer@example.com")
     assert approvals.revoke("deploy-27-abc1234") is True
-    result = deployment_server.deploy_production(
-        deployment_id="deploy-27-abc1234", source=_fixed_source()
-    )
+    result = deployment_server.deploy_production(deployment_id="deploy-27-abc1234")
     assert result["error"] == "human_approval_required"
 
 
@@ -121,7 +120,7 @@ def test_the_deploy_tool_exposes_no_way_to_supply_a_token():
     import inspect
 
     params = set(inspect.signature(deployment_server.deploy_production).parameters)
-    assert params == {"deployment_id", "source"}
+    assert params == {"deployment_id"}
     assert not any("token" in p or "approv" in p for p in params)
 
 
@@ -141,11 +140,9 @@ def test_no_mcp_tool_can_grant_an_approval():
 
 
 def test_preparing_a_deployment_does_not_deploy_anything(live_simulator):
+    _ARTIFACTS["abc1234def"] = _fixed_source()
     plan = deployment_server.prepare_production_deployment(
-        source=_fixed_source(),
-        summary="fix discount calculation",
-        pr_number=27,
-        commit_sha="abc1234def",
+        summary="fix discount calculation", pr_number=27, commit_sha="abc1234def"
     )
     assert plan["approval_status"] == "pending_human_approval"
     assert plan["reversible"] is False
@@ -161,9 +158,7 @@ def test_approved_deployment_reaches_production_and_recovers_it(live_simulator):
     deployment_id = _prepare()
     approvals.grant(deployment_id, approved_by="engineer@example.com")
 
-    result = deployment_server.deploy_production(
-        deployment_id=deployment_id, source=_fixed_source()
-    )
+    result = deployment_server.deploy_production(deployment_id=deployment_id)
 
     assert result["status"] == "deployed"
     assert result["production_changed"] is True
@@ -235,13 +230,12 @@ def test_approval_cannot_be_redirected_at_different_code(live_simulator):
     approve a reviewed one-line fix and then ship entirely different source under
     the approved id.
     """
-    deployment_id = _prepare(source=_fixed_source())
+    deployment_id = _prepare(source=_fixed_source(), commit_sha="abc1234def")
     approvals.grant(deployment_id, approved_by="engineer@example.com")
 
-    substituted = _fixed_source() + "\n# smuggled in after review\nimport os\n"
-    result = deployment_server.deploy_production(
-        deployment_id=deployment_id, source=substituted
-    )
+    # Someone rewrites what that commit resolves to after the human approved it.
+    _ARTIFACTS["abc1234def"] = _fixed_source() + "\n# smuggled in after review\nimport os\n"
+    result = deployment_server.deploy_production(deployment_id=deployment_id)
 
     assert result["error"] == "artifact_mismatch"
     assert result["production_changed"] is False
@@ -252,24 +246,20 @@ def test_approval_cannot_be_redirected_at_different_code(live_simulator):
 
 def test_a_mismatched_artifact_does_not_burn_the_approval():
     """The digest is checked first, so a failed substitution is recoverable."""
-    deployment_id = _prepare(source=_fixed_source())
+    deployment_id = _prepare(source=_fixed_source(), commit_sha="abc1234def")
     approvals.grant(deployment_id, approved_by="engineer@example.com")
 
-    deployment_server.deploy_production(
-        deployment_id=deployment_id, source="# not the reviewed code"
-    )
+    _ARTIFACTS["abc1234def"] = "# not the reviewed code"
+    deployment_server.deploy_production(deployment_id=deployment_id)
 
-    honest = deployment_server.deploy_production(
-        deployment_id=deployment_id, source=_fixed_source()
-    )
+    _ARTIFACTS["abc1234def"] = _fixed_source()
+    honest = deployment_server.deploy_production(deployment_id=deployment_id)
     assert honest["production_changed"] is True, "the human's approval should still be usable"
 
 
 def test_deploying_something_never_prepared_is_refused():
     approvals.grant("deploy-99-nothing", approved_by="engineer@example.com")
-    result = deployment_server.deploy_production(
-        deployment_id="deploy-99-nothing", source=_fixed_source()
-    )
+    result = deployment_server.deploy_production(deployment_id="deploy-99-nothing")
     assert result["error"] == "human_approval_required"
     assert "never prepared" in result["detail"]
 
@@ -278,7 +268,7 @@ def test_the_ledger_records_which_change_was_deployed(live_simulator):
     """A hard-coded revision id made every deployment look like the same one."""
     deployment_id = _prepare(pr_number=27, commit_sha="abc1234def")
     approvals.grant(deployment_id, approved_by="engineer@example.com")
-    deployment_server.deploy_production(deployment_id=deployment_id, source=_fixed_source())
+    deployment_server.deploy_production(deployment_id=deployment_id)
 
     deployed = httpx.get(f"{live_simulator}/health", timeout=5).json()["deployed_revision"]
     assert deployed == "pr27-abc1234"

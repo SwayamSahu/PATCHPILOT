@@ -16,6 +16,7 @@ import sys
 from typing import Annotated
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -72,6 +73,7 @@ def _guard(call):
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Current health of a service: status, error rate, p95 latency, "
     "and the revision currently deployed."
 )
@@ -80,6 +82,7 @@ def get_service_health(service: Service = "checkout-api") -> dict:
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Minute-bucketed metric history for a service: request_count, "
     "error_count, error_rate, and p50/p95/p99 latency. Use this to find when a "
     "problem started."
@@ -90,12 +93,64 @@ def get_metrics(
         int, Field(description="How far back to look, in minutes.", ge=1, le=720)
     ] = 45,
 ) -> dict:
-    return _check_service(service) or _guard(
-        lambda: simulator.get("/metrics", params={"minutes": minutes})
-    )
+    unavailable = _check_service(service)
+    if unavailable:
+        return unavailable
+    raw = _guard(lambda: simulator.get("/metrics", params={"minutes": minutes}))
+    return raw if "error" in raw else _summarise(raw)
+
+
+def _summarise(raw: dict) -> dict:
+    """Compact a minute-by-minute series into something worth reading.
+
+    Returning sixty raw buckets is a poor tool result twice over. It buries the
+    finding that matters - error rate changed at a particular moment - under
+    arithmetic the model then has to do itself, and it consumes enough context to
+    measurably slow every later step in the investigation.
+
+    So the per-revision breakdown is computed here, where it is exact, and the
+    series is downsampled to a readable shape. The comparison an investigation
+    actually needs is then a single glance.
+    """
+    series = raw.get("series", [])
+    if not series:
+        return raw
+
+    by_revision: dict = {}
+    for point in series:
+        bucket = by_revision.setdefault(
+            point["revision_id"],
+            {"revision_id": point["revision_id"], "samples": 0, "error_rates": [], "p95": []},
+        )
+        bucket["samples"] += 1
+        bucket["error_rates"].append(point["error_rate"])
+        bucket["p95"].append(point["p95_latency_ms"])
+
+    breakdown = []
+    for bucket in by_revision.values():
+        rates, latencies = bucket["error_rates"], bucket["p95"]
+        breakdown.append({
+            "revision_id": bucket["revision_id"],
+            "samples": bucket["samples"],
+            "avg_error_rate": round(sum(rates) / len(rates), 4),
+            "peak_error_rate": round(max(rates), 4),
+            "avg_p95_latency_ms": round(sum(latencies) / len(latencies), 1),
+        })
+
+    step = max(1, len(series) // 12)
+    return {
+        "service": raw.get("service"),
+        "window_minutes": raw.get("window_minutes"),
+        "current": raw.get("current"),
+        "by_revision": breakdown,
+        "series": series[::step][-12:],
+        "note": "by_revision compares each deployed revision over this window; "
+        "series is downsampled to 12 points.",
+    }
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Search application logs. Filter by free text and/or level "
     "(INFO, ERROR). Error entries include the exception, file, line, and full "
     "stack trace."
@@ -115,6 +170,7 @@ def query_logs(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Deployment history for a service, oldest first. Each record has "
     "a revision id, summary, author, timestamp, and whether it proved healthy. "
     "Correlate these timestamps against when metrics degraded."
@@ -123,7 +179,9 @@ def get_recent_deployments(service: Service = "checkout-api") -> dict:
     return _check_service(service) or _guard(lambda: simulator.get("/deployments"))
 
 
-@server.tool(description="Full details of a specific incident, including the breached threshold.")
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    description="Full details of a specific incident, including the breached threshold.")
 def get_incident_details(
     incident_id: Annotated[str, Field(description="Incident id, e.g. 'INC-4021'.")] = "INC-4021",
 ) -> dict:
@@ -131,6 +189,7 @@ def get_incident_details(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="A captured stack trace from the failing code path, including the "
     "exception type, source file, line number, and the offending source line."
 )

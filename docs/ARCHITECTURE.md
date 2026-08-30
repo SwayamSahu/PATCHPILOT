@@ -127,9 +127,14 @@ it cannot deploy something dangerous.** That separation is the point of the desi
 
 Local models default to a small context (often 4k). The agent loop carries tool
 schemas plus accumulated results and will silently truncate, after which tool calls
-begin to fail in confusing ways. Ollama must be served with
-`OLLAMA_CONTEXT_LENGTH=32768`; this is set in `.env.example` and asserted by the
-setup script rather than left to chance.
+begin to fail in confusing ways.
+
+Oversizing it is the opposite mistake, and a more expensive one than it looks. At
+32k the model occupies 9.8GB; alongside the harness, the web dev server and the
+Python services on a 16GB machine that left under 10% of memory free, and every
+model call slowed to a crawl under swap pressure. `OLLAMA_CONTEXT_LENGTH=16384`
+keeps it at 7.7GB, which fits the largest turn comfortably now that tool results
+are summarised rather than returned raw.
 
 ## 5. The five agents
 

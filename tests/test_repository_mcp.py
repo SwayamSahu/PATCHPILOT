@@ -170,6 +170,53 @@ def test_invalid_branch_names_are_refused(repo):
 
 
 # --------------------------------------------------------------------------
+# Targeted edits
+# --------------------------------------------------------------------------
+
+
+def test_edit_file_replaces_a_unique_string(repo):
+    result = repo_server.edit_file(
+        path="app/checkout.py",
+        old_string="return subtotal / discount",
+        new_string="return subtotal * (1 - discount)",
+    )
+    assert result["replaced"] is True
+    assert "subtotal * (1 - discount)" in (repo / "app" / "checkout.py").read_text()
+
+
+def test_edit_file_refuses_an_ambiguous_match(repo):
+    """Applying to the first hit is rarely what was meant, so refuse instead."""
+    (repo / "app" / "dup.py").write_text("x = 1\nx = 1\n")
+    result = repo_server.edit_file(path="app/dup.py", old_string="x = 1", new_string="x = 2")
+    assert result["error"] == "repository_error"
+    assert "appears 2 times" in result["detail"]
+    assert (repo / "app" / "dup.py").read_text() == "x = 1\nx = 1\n"
+
+
+def test_edit_file_reports_a_missing_match_rather_than_guessing(repo):
+    result = repo_server.edit_file(
+        path="app/checkout.py", old_string="not in the file", new_string="x"
+    )
+    assert result["error"] == "repository_error"
+    assert "not found" in result["detail"]
+
+
+def test_edit_file_is_subject_to_the_path_jail(repo):
+    assert repo_server.edit_file(path="../escape.py", old_string="a", new_string="b")["error"]
+    assert repo_server.edit_file(path=".env", old_string="GITHUB_TOKEN", new_string="x")["error"]
+
+
+def test_append_to_file_preserves_existing_content(repo):
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("def test_one():\n    assert True\n")
+    repo_server.append_to_file(
+        path="tests/test_x.py", content="def test_two():\n    assert True\n"
+    )
+    body = (repo / "tests" / "test_x.py").read_text()
+    assert "def test_one" in body and "def test_two" in body
+
+
+# --------------------------------------------------------------------------
 # Tests are really executed
 # --------------------------------------------------------------------------
 
@@ -213,3 +260,87 @@ def test_no_tool_returns_the_token(repo):
     blob = repr(results)
     assert "GITHUB_TOKEN=" not in blob
     assert "ghp_" not in blob
+
+
+# --------------------------------------------------------------------------
+# Security fixes from Qodo review of PR #9
+# --------------------------------------------------------------------------
+
+
+def test_test_runs_do_not_inherit_credentials(repo, monkeypatch):
+    """Running a test suite is arbitrary code execution.
+
+    Redacting output afterwards is no defence: code can encode a secret, write it
+    to a file, or send it over the network. The credential must not be in the
+    environment at all.
+    """
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+    monkeypatch.setenv("DAYTONA_API_KEY", "dtn_secret")
+    env = gitrepo._test_env()
+    assert "GITHUB_TOKEN" not in env
+    assert "DAYTONA_API_KEY" not in env
+    assert not [k for k in env if "TOKEN" in k or "KEY" in k]
+
+
+def test_a_hostile_test_cannot_read_the_token(repo, monkeypatch):
+    """End to end: a test that tries to print the token gets nothing."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_supersecret_value")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_leak.py").write_text(
+        "import os\n"
+        "def test_leak():\n"
+        "    assert os.environ.get('GITHUB_TOKEN') is None, os.environ.get('GITHUB_TOKEN')\n"
+    )
+    result = repo_server.run_git_tests(target="tests/")
+    assert result["passed"] is True, "the token was visible to the test subprocess"
+
+
+def test_a_pytest_option_cannot_masquerade_as_a_test_path(repo):
+    """`--basetemp=/somewhere` is an option pytest acts on, not a path."""
+    result = repo_server.run_git_tests(target="--basetemp=/tmp/pytest-escape")
+    assert result["error"] == "repository_error"
+
+
+def test_commit_refuses_when_an_off_limits_file_changed(repo):
+    """`git add -A` would smuggle a workflow file past the write rules."""
+    repo_server.create_branch(branch_name="fix/x")
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "ci.yml").write_text("run: curl evil.example\n")
+    (repo / "app" / "checkout.py").write_text("# a legitimate change\n")
+
+    result = repo_server.commit_changes(message="fix: something")
+    assert result["error"] == "repository_error"
+    assert ".github/workflows/ci.yml" in result["detail"]
+
+
+def test_commit_succeeds_when_only_allowed_files_changed(repo):
+    repo_server.create_branch(branch_name="fix/y")
+    (repo / "app" / "checkout.py").write_text("# a legitimate change\n")
+    assert len(repo_server.commit_changes(message="fix: legitimate")["sha"]) == 40
+
+
+@pytest.mark.parametrize("bad", ["HEAD:main", "--all", "-f", "refs/heads/x:refs/heads/main"])
+def test_push_refuses_anything_that_is_not_a_plain_branch_name(repo, bad):
+    """A refspec would push straight onto the base branch, skipping review."""
+    with pytest.raises(gitrepo.RepositoryError):
+        gitrepo.push(bad)
+
+
+def test_recreating_a_branch_resets_it_to_the_base(repo):
+    """A retry must start from the base it reports, not the last attempt."""
+    repo_server.create_branch(branch_name="fix/retry")
+    (repo / "app" / "checkout.py").write_text("# half-finished first attempt\n")
+    repo_server.commit_changes(message="wip: first attempt")
+    stale = gitrepo.head_sha()
+
+    repo_server.create_branch(branch_name="fix/retry")
+    assert gitrepo.head_sha() != stale, "the retry inherited the previous attempt"
+
+
+def test_a_deleted_reviewer_does_not_crash_pull_request_retrieval():
+    """GitHub leaves `user` null for deleted accounts."""
+    from mcp_servers.repository import github_api
+
+    assert github_api._login(None) == "ghost"
+    assert github_api._login({"login": None}) == "ghost"
+    assert github_api._login({"login": "octocat"}) == "octocat"

@@ -105,16 +105,20 @@ def _askpass_script() -> Path | None:
     if not token:
         return None
     path = work_repo().parent / ".patchpilot-askpass.sh"
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "#!/bin/sh\n"
-            'case "$1" in\n'
-            "  Username*) printf '%s' \"x-access-token\" ;;\n"
-            "  *)         printf '%s' \"$GITHUB_TOKEN\" ;;\n"
-            "esac\n"
-        )
-        path.chmod(0o700)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Always rewrite it. Reusing whatever is already at this path would execute
+    # someone else's script with the GitHub token in its environment, which is a
+    # credential handover rather than a convenience.
+    if path.is_symlink():
+        path.unlink()
+    path.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  Username*) printf '%s' \"x-access-token\" ;;\n"
+        "  *)         printf '%s' \"$GITHUB_TOKEN\" ;;\n"
+        "esac\n"
+    )
+    path.chmod(0o700)
     return path
 
 
@@ -247,6 +251,23 @@ def diff(sha: str) -> dict:
     return {"sha": sha, "diff": git_or_raise("show", "--format=", sha)}
 
 
+def read_file_at(commit_sha: str, relative: str) -> str:
+    """Read a file's contents as of a specific commit.
+
+    Used to fetch the exact artifact a deployment was prepared from. Reading from
+    an immutable commit rather than the working tree means the thing deployed is
+    the thing reviewed, even if the checkout has moved on since.
+    """
+    require_ready()
+    resolve_path(relative)
+    result = run_git("show", f"{commit_sha}:{relative}")
+    if not result.ok:
+        raise RepositoryError(
+            f"could not read {relative!r} at commit {commit_sha!r}: {result.stderr.strip()}"
+        )
+    return result.stdout
+
+
 def working_diff() -> dict:
     """The uncommitted change set — what the agent has actually written."""
     require_ready()
@@ -268,16 +289,31 @@ def head_sha() -> str:
 # --------------------------------------------------------------------------
 
 
+def _is_plain_branch_name(name: str) -> bool:
+    """True for an ordinary branch name: no options, refspecs, or path tricks."""
+    if not name or name.startswith("-") or name.startswith("/"):
+        return False
+    forbidden = {":", " ", "\t", "~", "^", "?", "*", "[", "\\"}
+    return not (set(name) & forbidden) and ".." not in name and not name.endswith(".lock")
+
+
 def create_branch(name: str, base: str | None = None) -> dict:
+    """Create a branch from `base`, resetting it if it already exists.
+
+    A retry must start from the base it reports, not from whatever a previous
+    attempt left behind. Checking out a stale branch and returning the requested
+    base would make a second attempt inherit the first one's half-finished work
+    while claiming a clean start.
+    """
     require_ready()
-    if not name or name.startswith("-") or ".." in name or " " in name:
+    if not _is_plain_branch_name(name):
         raise RepositoryError(f"invalid branch name {name!r}")
     base = base or base_branch()
     git_or_raise("checkout", base)
     result = run_git("checkout", "-b", name)
     if not result.ok:
         if "already exists" in result.stderr:
-            git_or_raise("checkout", name)
+            git_or_raise("checkout", "-B", name, base)
         else:
             raise RepositoryError(f"could not create branch {name!r}: {result.stderr.strip()}")
     return {"branch": name, "base": base, "head": head_sha()}
@@ -299,14 +335,101 @@ def write_file(relative: str, content: str) -> dict:
     }
 
 
+def edit_file(relative: str, old_string: str, new_string: str) -> dict:
+    """Replace one exact occurrence of `old_string` with `new_string`.
+
+    Preferred over rewriting a whole file. Two reasons, and both matter:
+
+    * It makes an over-broad change hard to perform by accident. The edit is
+      confined to text the caller had to quote exactly, so a minimal fix stays
+      minimal and the diff stays reviewable.
+    * It is far more reliable for a smaller model, which can restate one line
+      accurately but tends to drop or mangle content when asked to reproduce an
+      entire file.
+
+    The match must be unique. An ambiguous edit is refused rather than applied to
+    the first hit, because "the first one" is rarely the one that was meant.
+    """
+    require_ready()
+    path = resolve_path(relative)
+    if not path.is_file():
+        raise RepositoryError(f"{relative!r} does not exist in the repository")
+    if not old_string:
+        raise RepositoryError("old_string must not be empty")
+
+    content = path.read_text()
+    occurrences = content.count(old_string)
+    if occurrences == 0:
+        raise RepositoryError(
+            f"the text to replace was not found in {relative!r}. Read the file again "
+            "and quote the exact text, including indentation."
+        )
+    if occurrences > 1:
+        raise RepositoryError(
+            f"the text to replace appears {occurrences} times in {relative!r}. "
+            "Include surrounding lines to make it unique."
+        )
+
+    path.write_text(content.replace(old_string, new_string))
+    return {
+        "path": relative,
+        "replaced": True,
+        "lines_before": content.count("\n") + 1,
+        "lines_after": content.replace(old_string, new_string).count("\n") + 1,
+    }
+
+
+def append_to_file(relative: str, content: str) -> dict:
+    """Append text to a file, creating it if absent.
+
+    Adding a regression test is an append, not a rewrite. Expressing it that way
+    means an agent adding a test cannot accidentally delete the tests already
+    there.
+    """
+    require_ready()
+    path = resolve_path(relative)
+    existed = path.is_file()
+    before = path.read_text() if existed else ""
+    if not before or before.endswith("\n\n"):
+        separator = ""
+    elif before.endswith("\n"):
+        separator = "\n"
+    else:
+        separator = "\n\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(before + separator + content.rstrip("\n") + "\n")
+    return {"path": relative, "created": not existed, "appended_bytes": len(content.encode())}
+
+
 def commit(message: str) -> dict:
     require_ready()
     if not message.strip():
         raise RepositoryError("a commit message is required")
-    git_or_raise("add", "-A")
-    status = git_or_raise("status", "--porcelain")
+    # -uall lists untracked files individually. Without it git collapses a new
+    # directory to ".github/", and a prefix check for ".github/workflows/" would
+    # sail straight past the file it was meant to catch.
+    status = git_or_raise("status", "--porcelain", "-uall")
     if not status.strip():
         raise RepositoryError("there is nothing to commit")
+
+    # `git add -A` would stage anything in the tree, including files the write
+    # tools refuse. A hostile or careless test run could drop a workflow file into
+    # the working tree, and committing it would smuggle it past the path rules on
+    # the way to a pull request. Stage explicitly, and refuse if a denied path has
+    # appeared at all rather than quietly leaving it behind.
+    changed = [line[3:].strip().strip('"') for line in status.splitlines() if line.strip()]
+    changed = [path.split(" -> ")[-1] for path in changed]
+    denied = [
+        path
+        for path in changed
+        if any(path.startswith(prefix) for prefix in DENIED_PREFIXES) or path in DENIED_NAMES
+    ]
+    if denied:
+        raise RepositoryError(
+            f"refusing to commit: off-limits paths changed in the working tree: {denied}"
+        )
+    for path in changed:
+        git_or_raise("add", "--", path)
     result = run_git("commit", "-m", message)
     if not result.ok:
         raise RepositoryError(f"commit failed: {result.stderr.strip()}")
@@ -316,7 +439,17 @@ def commit(message: str) -> dict:
 def push(branch: str | None = None) -> dict:
     require_ready()
     branch = branch or current_branch()
-    result = run_git("push", "--set-upstream", "origin", branch, timeout=180)
+
+    # A bare branch argument is passed to git as a refspec, so "HEAD:main" would
+    # push the working tree straight onto the base branch, and "--all" would push
+    # everything - both bypassing the pull request the review depends on. Only a
+    # plain branch name is accepted, and it is expanded to an explicit refspec.
+    if not _is_plain_branch_name(branch):
+        raise RepositoryError(
+            f"{branch!r} is not a plain branch name. Refspecs and options are not accepted."
+        )
+    refspec = f"refs/heads/{branch}:refs/heads/{branch}"
+    result = run_git("push", "--set-upstream", "origin", refspec, timeout=180)
     if not result.ok:
         raise RepositoryError(f"push failed: {result.stderr.strip()}")
     return {"branch": branch, "pushed": True}
@@ -327,6 +460,36 @@ def push(branch: str | None = None) -> dict:
 # --------------------------------------------------------------------------
 
 
+SECRET_ENV_PREFIXES = ("GITHUB_", "DAYTONA_", "OPENAI_", "ANTHROPIC_", "PATCHPILOT_INTERNAL")
+SECRET_ENV_NAMES = {"GITHUB_TOKEN", "GH_PUSH_TOKEN", "GH_TOKEN"}
+
+
+def _test_env() -> dict:
+    """A minimal environment for running agent-authored tests.
+
+    Running a test suite *is* arbitrary code execution: pytest imports and runs
+    whatever the agent wrote. Inheriting the parent environment would hand that
+    code the GitHub token, and redacting output afterwards is no defence at all -
+    code can encode a secret, write it to a file, or send it over the network.
+
+    So the subprocess gets only what it needs to run Python, and every
+    credential-shaped variable is withheld. The blast radius of a hostile test is
+    then the throwaway clone it runs in.
+    """
+    keep = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
+    env = {name: os.environ[name] for name in keep if name in os.environ}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONPATH"] = str(work_repo())
+    leaked = [
+        name
+        for name in env
+        if name in SECRET_ENV_NAMES or name.startswith(SECRET_ENV_PREFIXES)
+    ]
+    for name in leaked:  # pragma: no cover - belt and braces
+        env.pop(name, None)
+    return env
+
+
 def run_tests(target: str = "tests/", timeout: int = TEST_TIMEOUT) -> dict:
     """Run the repository's test suite and report the real result.
 
@@ -334,18 +497,25 @@ def run_tests(target: str = "tests/", timeout: int = TEST_TIMEOUT) -> dict:
     time limited so a hanging test cannot stall the workflow indefinitely.
     """
     require_ready()
+
+    # `--basetemp=/somewhere` is not a path, it is a pytest option, and pytest
+    # clears the directory it names. Rejecting leading dashes and passing the
+    # target after `--` keeps a test selector from becoming an option.
+    if target.startswith("-"):
+        raise PathNotAllowed(f"{target!r} is an option, not a test path")
     resolve_path(target.rstrip("/") or ".")
+
     python = work_repo() / ".venv" / "bin" / "python"
     if not python.exists():
         python = Path(REPO_ROOT) / ".venv" / "bin" / "python"
     try:
         completed = subprocess.run(
-            [str(python), "-m", "pytest", target, "-q"],
+            [str(python), "-m", "pytest", "-q", "--", target],
             cwd=str(work_repo()),
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            env=_test_env(),
         )
     except subprocess.TimeoutExpired:
         return {

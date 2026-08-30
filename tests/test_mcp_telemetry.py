@@ -28,12 +28,12 @@ def test_health_matches_what_the_service_reports(live_simulator):
     assert tool["deployed_revision"] == "4c21"
 
 
-def test_metrics_return_a_series_that_spans_the_requested_window():
+def test_metrics_return_a_summary_of_the_requested_window():
     result = telemetry_server.get_metrics(minutes=30)
     assert result["window_minutes"] == 30
-    assert len(result["series"]) >= 30
+    assert result["by_revision"], "the per-revision breakdown is the useful part"
     point = result["series"][-1]
-    assert {"error_rate", "p95_latency_ms", "request_count"} <= set(point)
+    assert {"error_rate", "p95_latency_ms", "request_count", "revision_id"} <= set(point)
 
 
 def test_metrics_show_the_error_spike_beginning_at_the_faulty_deployment():
@@ -103,3 +103,27 @@ def test_an_unknown_service_is_rejected_rather_than_silently_answered():
 
     assert telemetry_server.get_metrics(service="typo-api")["error"] == "unknown_service"
     assert telemetry_server.query_logs(service="typo-api")["error"] == "unknown_service"
+
+
+def test_metrics_summarise_by_revision_so_the_correlation_is_visible():
+    """The finding that matters is which revision changed the error rate.
+
+    Returning sixty raw buckets buries that under arithmetic the model has to do
+    itself, and costs enough context to slow every later step.
+    """
+    result = telemetry_server.get_metrics(minutes=60)
+    breakdown = {b["revision_id"]: b for b in result["by_revision"]}
+
+    assert "4c21" in breakdown, "the window should include the faulty revision"
+    healthy = [b for rid, b in breakdown.items() if rid != "4c21"]
+    assert healthy, "the window should straddle the deployment"
+
+    assert breakdown["4c21"]["avg_error_rate"] > 0.25
+    assert all(b["avg_error_rate"] < 0.05 for b in healthy)
+    assert breakdown["4c21"]["avg_p95_latency_ms"] > max(b["avg_p95_latency_ms"] for b in healthy)
+
+
+def test_metrics_series_is_downsampled_to_a_readable_size():
+    result = telemetry_server.get_metrics(minutes=120)
+    assert len(result["series"]) <= 12
+    assert result["current"], "the current sample is still reported in full"

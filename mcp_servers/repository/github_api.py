@@ -76,12 +76,44 @@ def create_pull_request(title: str, body: str, head: str, base: str) -> dict:
     }
 
 
+def _paginate(path: str, limit: int = 300) -> list:
+    """Collect every page of a list endpoint.
+
+    GitHub returns 30 items per page by default. A single request would silently
+    drop review feedback beyond the first page, and the Developer agent would
+    believe it had absorbed every finding while never having seen some of them -
+    the worst possible way to lose a code review comment.
+    """
+    collected, page = [], 1
+    while len(collected) < limit:
+        batch = _request("GET", path, params={"per_page": 100, "page": page})
+        if not isinstance(batch, list) or not batch:
+            break
+        collected.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    return collected
+
+
+def _login(actor) -> str:
+    """A commenter's login, tolerating deleted accounts.
+
+    GitHub leaves `user` null when the account is gone. Dereferencing it blindly
+    turned one deleted reviewer into a crash that took the whole pull request
+    read with it.
+    """
+    if not isinstance(actor, dict):
+        return "ghost"
+    return actor.get("login") or "ghost"
+
+
 def get_pull_request(number: int) -> dict:
     slug = repo_slug()
     pr = _request("GET", f"/repos/{slug}/pulls/{number}")
-    comments = _request("GET", f"/repos/{slug}/issues/{number}/comments")
-    inline = _request("GET", f"/repos/{slug}/pulls/{number}/comments")
-    reviews = _request("GET", f"/repos/{slug}/pulls/{number}/reviews")
+    comments = _paginate(f"/repos/{slug}/issues/{number}/comments")
+    inline = _paginate(f"/repos/{slug}/pulls/{number}/comments")
+    reviews = _paginate(f"/repos/{slug}/pulls/{number}/reviews")
     return {
         "number": pr["number"],
         "url": pr["html_url"],
@@ -96,8 +128,8 @@ def get_pull_request(number: int) -> dict:
         "changed_files": pr.get("changed_files"),
         "review_comments": [
             {
-                "author": c["user"]["login"],
-                "body": c["body"],
+                "author": _login(c.get("user")),
+                "body": c.get("body", ""),
                 "path": c.get("path"),
                 "line": c.get("line"),
                 "kind": "inline",
@@ -105,11 +137,15 @@ def get_pull_request(number: int) -> dict:
             for c in inline
         ]
         + [
-            {"author": c["user"]["login"], "body": c["body"], "kind": "comment"}
+            {"author": _login(c.get("user")), "body": c.get("body", ""), "kind": "comment"}
             for c in comments
         ],
         "reviews": [
-            {"author": r["user"]["login"], "state": r["state"], "body": r.get("body", "")}
+            {
+                "author": _login(r.get("user")),
+                "state": r.get("state", ""),
+                "body": r.get("body", "") or "",
+            }
             for r in reviews
         ],
     }

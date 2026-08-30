@@ -15,6 +15,7 @@ import sys
 from typing import Annotated
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -51,7 +52,9 @@ def _guard(call):
 # --------------------------------------------------------------------------
 
 
-@server.tool(description="Read a file from the repository by its repo-relative path.")
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    description="Read a file from the repository by its repo-relative path.")
 def get_repository_file(
     path: Annotated[str, Field(description="Repo-relative path, e.g. 'app/checkout.py'.")],
 ) -> dict:
@@ -59,6 +62,7 @@ def get_repository_file(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Commit history, most recent first. Pass a path to see only the "
     "commits that touched that file - useful for finding when a defect appeared."
 )
@@ -69,14 +73,18 @@ def get_git_history(
     return _guard(lambda: {"commits": gitrepo.history(path or None, limit)})
 
 
-@server.tool(description="Details of a single commit: author, date, message, and files changed.")
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    description="Details of a single commit: author, date, message, and files changed.")
 def get_commit(
     commit_sha: Annotated[str, Field(description="Full or short commit SHA.")],
 ) -> dict:
     return _guard(lambda: gitrepo.commit_details(commit_sha))
 
 
-@server.tool(description="The full diff introduced by a commit.")
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    description="The full diff introduced by a commit.")
 def get_diff(
     commit_sha: Annotated[str, Field(description="Full or short commit SHA.")],
 ) -> dict:
@@ -84,6 +92,7 @@ def get_diff(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="The uncommitted changes currently in the working tree - what has "
     "been written but not yet committed."
 )
@@ -96,7 +105,9 @@ def get_working_diff() -> dict:
 # --------------------------------------------------------------------------
 
 
-@server.tool(description="Create a branch from the base branch and switch to it.")
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+    description="Create a branch from the base branch and switch to it.")
 def create_branch(
     branch_name: Annotated[
         str, Field(description="New branch name, e.g. 'fix/checkout-discount'.")
@@ -107,6 +118,7 @@ def create_branch(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
     description="Write a file in the repository, replacing its contents. Paths "
     "outside the repository, repository internals, CI workflows, and environment "
     "files are refused."
@@ -119,6 +131,33 @@ def write_file(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+    description="Replace one exact, unique piece of text in a file. Prefer this "
+    "over write_file: it keeps the change minimal and you only have to restate "
+    "the lines you are changing. The old text must appear exactly once.",
+)
+def edit_file(
+    path: Annotated[str, Field(description="Repo-relative path to edit.")],
+    old_string: Annotated[str, Field(description="Exact text to replace, including indentation.")],
+    new_string: Annotated[str, Field(description="Replacement text.")],
+) -> dict:
+    return _guard(lambda: gitrepo.edit_file(path, old_string, new_string))
+
+
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+    description="Append text to the end of a file, creating it if needed. Use this "
+    "to add a regression test without rewriting the tests already there.",
+)
+def append_to_file(
+    path: Annotated[str, Field(description="Repo-relative path.")],
+    content: Annotated[str, Field(description="Text to append.")],
+) -> dict:
+    return _guard(lambda: gitrepo.append_to_file(path, content))
+
+
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Run the repository's test suite and return the real result. This "
     "is what decides whether a fix works."
 )
@@ -128,14 +167,18 @@ def run_git_tests(
     return _guard(lambda: gitrepo.run_tests(target))
 
 
-@server.tool(description="Commit all current changes to the active branch.")
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+    description="Commit all current changes to the active branch.")
 def commit_changes(
     message: Annotated[str, Field(description="Commit message.")],
 ) -> dict:
     return _guard(lambda: gitrepo.commit(message))
 
 
-@server.tool(description="Push the current branch to GitHub.")
+@server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+    description="Push the current branch to GitHub.")
 def push_branch(
     branch: Annotated[str, Field(description="Branch to push. Defaults to the active one.")] = "",
 ) -> dict:
@@ -143,6 +186,7 @@ def push_branch(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
     description="Open a pull request on GitHub for a pushed branch. Returns the "
     "PR number and URL."
 )
@@ -160,6 +204,7 @@ def create_pull_request(
 
 
 @server.tool(
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     description="Read a pull request including its review comments. Use this to "
     "collect code review findings and address them."
 )

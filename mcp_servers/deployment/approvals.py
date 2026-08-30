@@ -97,7 +97,14 @@ def source_digest(source: str) -> str:
     return hashlib.sha256(source.encode()).hexdigest()
 
 
-def prepare(deployment_id: str, source: str, summary: str, pr_number: int, commit_sha: str) -> dict:
+def prepare(
+    deployment_id: str,
+    source: str,
+    summary: str,
+    pr_number: int,
+    commit_sha: str,
+    artifact_path: str = "",
+) -> dict:
     """Record what is being proposed, so approval can be tied to it."""
     with _lock:
         path = _pending_path()
@@ -108,6 +115,7 @@ def prepare(deployment_id: str, source: str, summary: str, pr_number: int, commi
             "summary": summary,
             "pr_number": pr_number,
             "commit_sha": commit_sha,
+            "path": artifact_path,
             "prepared_at": _now().isoformat(),
         }
         data[deployment_id] = record
