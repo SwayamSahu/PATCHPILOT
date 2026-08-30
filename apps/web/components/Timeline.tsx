@@ -47,6 +47,25 @@ export function Timeline({ events, running }: { events: AgentEvent[]; running: b
   );
 }
 
+/**
+ * A stable clock time for an event.
+ *
+ * The locale is pinned rather than left to the browser. `toLocaleTimeString([])`
+ * picks up whatever the environment prefers, so the same instant can render as
+ * "23:28:41" in one place and "11:28:41 PM" in another - a hydration mismatch,
+ * and an inconsistent timeline besides.
+ */
+function formatTime(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "--:--:--";
+  return at.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
 const AGENT_LABEL: Record<string, string> = {
   "patchpilot-detective": "detective",
   "patchpilot-reproducer": "reproducer",
@@ -57,15 +76,15 @@ const AGENT_LABEL: Record<string, string> = {
 
 function Row({ event }: { event: AgentEvent }) {
   const { mark, tone } = presentation(event);
-  const time = new Date(event.timestamp).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  const time = formatTime(event.timestamp);
 
   return (
     <li className="flex items-start gap-3 text-xs leading-relaxed">
-      <span className="w-16 shrink-0 pt-0.5 text-[10px] text-muted">{time}</span>
+      {/* Rendered from the timestamp the server recorded, in the viewer's zone,
+          so it can differ between a server render and the client. */}
+      <span className="w-16 shrink-0 pt-0.5 text-[10px] text-muted" suppressHydrationWarning>
+        {time}
+      </span>
       <span className={`w-4 shrink-0 pt-0.5 ${tone}`}>{mark}</span>
       <span className="flex-1">
         <span className={tone}>{event.summary}</span>
