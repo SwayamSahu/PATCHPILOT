@@ -190,6 +190,24 @@ Full finding-by-finding record: **[docs/QODO.md](docs/QODO.md)**.
 
 Three-minute script with exact commands: **[docs/DEMO.md](docs/DEMO.md)**.
 
+## Screenshots
+
+The interface is three panels and one control:
+
+- **Left — the incident.** Severity, live error rate and p95 latency, the
+  deployment ledger with the faulty revision marked, and the agent's permission
+  boundaries with production shown as `BLOCKED`.
+- **Centre — the agent timeline.** Every tool call as it happens, the root cause
+  with its evidence, the sandbox reproduction, test results, and the pull request.
+- **Right — the evidence.** Root cause, confidence, and a verification checklist
+  that reflects checks re-run against git, the test suite and the GitHub API — a
+  check that has not run reads as pending, never as passing.
+- **Bottom — the approval gate.** Appears only while the harness is genuinely
+  paused, states that the action is irreversible, and requires a confirm step.
+
+Images are captured from a live run rather than mocked up; see
+[docs/DEMO.md](docs/DEMO.md) for the moments worth capturing.
+
 ## Installation
 
 Requires **Python 3.11+**, **Node 22.14+**, [uv](https://docs.astral.sh/uv/), and
