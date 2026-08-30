@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+
+body {
+  background: #0a0b0d;
+  color: #e6e8ec;
+}
+
+/* The timeline can get long during an investigation; keep its scrollbar quiet. */
+.scroll-quiet::-webkit-scrollbar { width: 8px; }
+.scroll-quiet::-webkit-scrollbar-thumb { background: #23252c; border-radius: 4px; }
+.scroll-quiet::-webkit-scrollbar-track { background: transparent; }
