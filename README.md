@@ -224,12 +224,15 @@ Pull the model and serve it with a large enough context window:
 
 ```bash
 ollama pull qwen3:8b
-OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+OLLAMA_CONTEXT_LENGTH=16384 ollama serve
 ```
 
-The context length matters: the agent loop carries tool schemas plus accumulated
-results, and a small window truncates silently, after which tool calls start
-failing in confusing ways.
+The context length matters in both directions. Ollama's default window is small
+enough that the agent loop — tool schemas plus accumulated results — truncates
+silently, after which tool calls start failing in confusing ways. But too large is
+also a mistake on a 16GB machine: at 32k the model occupies 9.8GB, and alongside
+the harness, the web dev server and the Python services that left under 10% of
+memory free and the pipeline crawled. 16k keeps it at 7.7GB and runs comfortably.
 
 ## Environment variables
 
